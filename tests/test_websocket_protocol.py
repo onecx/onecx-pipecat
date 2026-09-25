@@ -111,3 +111,81 @@ def test_disconnect_before_stop_session_does_not_raise(client):
     with client.websocket_connect(AUTHENTICATED_PATH) as websocket:
         websocket.send_json({"type": "START_SESSION", "session_type": "AI_CHAT"})
         websocket.receive_json()
+
+
+def test_interrupt_during_live_turn_over_websocket(client):
+    # The client must be able to interrupt a turn while it is actually
+    # running over the wire: send STOP_LISTENING (which starts the turn)
+    # immediately followed by INTERRUPT, without waiting for the turn's
+    # events. The TURN_INTERRUPTED event must be produced before the turn's
+    # ASSISTANT_* events complete.
+    with client.websocket_connect(AUTHENTICATED_PATH) as websocket:
+        websocket.send_json({"type": "START_SESSION", "session_type": "AI_CHAT"})
+        first = websocket.receive_json()
+        assert first["type"] == "SESSION_READY"
+        websocket.send_json({"type": "START_LISTENING"})
+        second = websocket.receive_json()
+        assert second["type"] == "LISTENING_STARTED"
+        websocket.send_json({"type": "AUDIO_CHUNK", "audio_base64": "AAA=", "sequence": 1})
+        websocket.send_json({"type": "STOP_LISTENING"})
+        # Immediately send the interrupt, before any turn event is consumed.
+        websocket.send_json({"type": "INTERRUPT"})
+
+        # Collect the turn's events up to and including the interruption.
+        turn_types = []
+        while True:
+            event = websocket.receive_json()
+            turn_types.append(event["type"])
+            if event["type"] == "TURN_INTERRUPTED":
+                break
+
+        # TURN_INTERRUPTED is only produced while the session is PROCESSING
+        # or RESPONDING; after the turn finished it would instead be an
+        # ILLEGAL_SESSION_TRANSITION ERROR. Receiving it proves the interrupt
+        # was read and dispatched while the turn was still running.
+        assert "TURN_INTERRUPTED" in turn_types
+        # The turn's ASSISTANT_* events must not have completed: a full turn
+        # emits 3 ASSISTANT_TEXT + 2 ASSISTANT_AUDIO_CHUNK = 5 assistant
+        # events, but the interrupt stops the turn mid-stream, so strictly
+        # fewer than 5 assistant events were produced before it.
+        assistant_events = sum(
+            1 for t in turn_types if t in ("ASSISTANT_TEXT", "ASSISTANT_AUDIO_CHUNK")
+        )
+        assert assistant_events < 5
+
+        # The connection remains operational after the interruption.
+        websocket.send_json({"type": "STOP_SESSION"})
+        final = websocket.receive_json()
+        assert final["type"] == "SESSION_STOPPED"
+
+
+def test_interrupted_turn_ends_connection_operatively(client):
+    # After an INTERRUPTed turn the session is back in READY; the connection
+    # must remain operational and still honor STOP_SESSION.
+    with client.websocket_connect(AUTHENTICATED_PATH) as websocket:
+        websocket.send_json({"type": "START_SESSION", "session_type": "AI_CHAT"})
+        websocket.receive_json()  # SESSION_READY
+        websocket.send_json({"type": "START_LISTENING"})
+        websocket.receive_json()  # LISTENING_STARTED
+        websocket.send_json({"type": "AUDIO_CHUNK", "audio_base64": "AAA=", "sequence": 1})
+        websocket.send_json({"type": "STOP_LISTENING"})
+        websocket.send_json({"type": "INTERRUPT"})
+        # Drain the (interrupted) turn up to and including TURN_INTERRUPTED.
+        while True:
+            event = websocket.receive_json()
+            if event["type"] == "TURN_INTERRUPTED":
+                break
+        websocket.send_json({"type": "STOP_SESSION"})
+        assert websocket.receive_json()["type"] == "SESSION_STOPPED"
+
+
+def test_interrupt_without_active_turn_yields_typed_error_over_websocket(client):
+    # INTERRUPT while no turn is processing/responding is an illegal
+    # session transition and must surface a typed ERROR event over the wire.
+    with client.websocket_connect(AUTHENTICATED_PATH) as websocket:
+        websocket.send_json({"type": "START_SESSION", "session_type": "AI_CHAT"})
+        assert websocket.receive_json()["type"] == "SESSION_READY"
+        websocket.send_json({"type": "INTERRUPT"})
+        event = websocket.receive_json()
+    assert event["type"] == "ERROR"
+    assert event["code"] == "ILLEGAL_SESSION_TRANSITION"

@@ -45,6 +45,12 @@ class FakeAssistantAdapter(AssistantAdapter):
         self, context: SessionContext, transcript: str
     ) -> AsyncIterator[str]:
         self.received_contexts.append(context)
+        # The first streaming boundary yields control to the event loop for a
+        # short real interval, simulating genuine assistant streaming latency.
+        # This is what makes a mid-turn INTERRUPT reachable end-to-end over the
+        # transport: the relay is suspended here long enough to read a command
+        # the client sent while the turn was still streaming.
+        await asyncio.sleep(0.05)
         yield "Sure,"
         await asyncio.sleep(0)
         yield " turning"

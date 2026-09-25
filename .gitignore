@@ -1,0 +1,9 @@
+# Python bytecode caches
+__pycache__/
+*.pyc
+
+# setuptools build/install metadata
+*.egg-info/
+
+# local test-run caches
+.pytest_cache/
