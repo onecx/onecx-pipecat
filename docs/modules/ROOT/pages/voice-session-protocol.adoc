@@ -1,0 +1,260 @@
+= Voice Session Protocol
+:toc:
+:toc-placement:
+
+== Overview
+
+The voice-session spine is exposed over an authenticated WebSocket at the route
+`/ws/voice-sessions/{session_type}`. The only supported `session_type` is
+`AI_CHAT`; any other value is rejected before the socket is accepted. This
+slice is backed entirely by in-memory fake adapters: it introduces no AWS, MCP,
+or other OneCX module dependency, so a complete voice turn can be verified in
+isolation.
+
+The transport is transport-neutral: the `VoiceSession` orchestrator
+(`src/onecx_pipecat/session.py`) exchanges pure command/event values with the
+WebSocket layer (`src/onecx_pipecat/transport/websocket.py`), and the adapters
+(`src/onecx_pipecat/adapters/`) can be replaced without changing session
+behavior.
+
+== Authentication and context
+
+Before the socket is accepted, `src/onecx_pipecat/auth.py` reads the
+`tenant_id` and `principal_id` query parameters from the WebSocket handshake.
+If either is missing or empty, the socket is closed with close code `4401`.
+The resulting identity is bound to an immutable `SessionContext`
+(`src/onecx_pipecat/context.py`) carrying `session_id`, `tenant_id`,
+`principal_id`, and `session_type`. This context is passed explicitly to every
+adapter call for the lifetime of the session, so tenant and principal
+propagation is structural rather than ambient.
+
+== Commands
+
+Inbound commands are JSON objects with a `type` discriminator.
+
+|===
+|Name |Required fields |Purpose
+
+|`START_SESSION`
+|`session_type`
+|Start the session; the server replies with `SESSION_READY`.
+
+|`STOP_SESSION`
+|
+|Stop the session; the server releases adapter resources and replies with `SESSION_STOPPED`.
+
+|`START_LISTENING`
+|
+|Enable the microphone and enter the listening state; the server replies with `LISTENING_STARTED`.
+
+|`STOP_LISTENING`
+|
+|Mute the microphone and begin processing the buffered audio; the server replies with `LISTENING_STOPPED`, `PROCESSING_STARTED`, and the turn's transcript/assistant events.
+
+|`AUDIO_CHUNK`
+|`audio_base64`, `sequence`
+|Buffer one audio chunk for the current turn. No event is emitted while listening.
+
+|`INTERRUPT`
+|
+|Interrupt an in-progress turn while processing or responding; the server replies with `TURN_INTERRUPTED`.
+|===
+
+== Events
+
+Outbound events are JSON objects with a `type` discriminator.
+
+|===
+|Name |Fields |Purpose
+
+|`SESSION_READY`
+|`session_id`
+|Confirms the session started; carries the server-assigned session id.
+
+|`LISTENING_STARTED`
+|
+|Confirms listening began.
+
+|`LISTENING_STOPPED`
+|
+|Confirms listening ended and audio is being processed.
+
+|`TRANSCRIPT_PARTIAL`
+|`text`, `sequence`
+|Streams a partial transcript fragment.
+
+|`TRANSCRIPT_FINAL`
+|`text`, `sequence`
+|Streams the finalized transcript for the turn.
+
+|`PROCESSING_STARTED`
+|
+|Signals that the assistant is processing the transcript.
+
+|`ASSISTANT_TEXT`
+|`text`, `sequence`
+|Streams an assistant text fragment.
+
+|`ASSISTANT_AUDIO_CHUNK`
+|`audio_base64`, `sequence`
+|Streams a synthesized assistant audio chunk.
+
+|`TURN_INTERRUPTED`
+|
+|Confirms the turn was interrupted.
+
+|`SESSION_STOPPED`
+|
+|Confirms the session stopped.
+
+|`CAPABILITY_DEGRADED`
+|`capability`, `reason`
+|Reports that a capability is degraded (e.g. an adapter failure).
+
+|`ERROR`
+|`code`, `message`, `fatal`
+|Reports a typed error. `code` is a stable error code such as `ILLEGAL_SESSION_TRANSITION`, `ILLEGAL_MICROPHONE_TRANSITION`, `ADAPTER_FAILURE`, or `INVALID_COMMAND`; `fatal` indicates whether the session is now in the `ERROR` state.
+|===
+
+== State model
+
+The session and the microphone are modeled as two independent state machines.
+They share no state and never reference each other; a single `VoiceSession`
+holds exactly one of each. Illegal triggers produce a typed `ERROR` event
+rather than closing the connection.
+
+.Session transitions
+|===
+|Current state |Trigger |Next state
+
+|`CREATED`
+|`start`
+|`READY`
+
+|`CREATED`
+|`fault`
+|`ERROR`
+
+|`READY`
+|`begin_listening`
+|`LISTENING`
+
+|`READY`
+|`stop`
+|`STOPPED`
+
+|`READY`
+|`fault`
+|`ERROR`
+
+|`LISTENING`
+|`begin_processing`
+|`PROCESSING`
+
+|`LISTENING`
+|`stop`
+|`STOPPED`
+
+|`LISTENING`
+|`fault`
+|`ERROR`
+
+|`PROCESSING`
+|`begin_responding`
+|`RESPONDING`
+
+|`PROCESSING`
+|`finish_turn`
+|`READY`
+
+|`PROCESSING`
+|`stop`
+|`STOPPED`
+
+|`PROCESSING`
+|`fault`
+|`ERROR`
+
+|`RESPONDING`
+|`finish_turn`
+|`READY`
+
+|`RESPONDING`
+|`stop`
+|`STOPPED`
+
+|`RESPONDING`
+|`fault`
+|`ERROR`
+
+|`STOPPED`
+|
+|
+
+|`ERROR`
+|
+|
+|===
+
+.Microphone transitions
+|===
+|Current state |Trigger |Next state
+
+|`MUTED`
+|`enable`
+|`LISTENING`
+
+|`LISTENING`
+|`disable`
+|`MUTED`
+
+|`LISTENING`
+|`suspend`
+|`SUSPENDED`
+
+|`SUSPENDED`
+|`resume`
+|`LISTENING`
+
+|`SUSPENDED`
+|`disable`
+|`MUTED`
+|===
+
+== Adapter seam
+
+`src/onecx_pipecat/adapters/base.py` defines the three adapter interfaces that
+are the only extension point for future non-fake adapters:
+
+- `SpeechToTextAdapter` — `stream_transcripts(context, audio_chunks)` yields
+  `TranscriptChunk` values.
+- `TextToSpeechAdapter` — `synthesize(context, text)` yields audio `bytes`.
+- `AssistantAdapter` — `respond(context, transcript)` yields assistant text.
+
+`src/onecx_pipecat/adapters/fakes.py` provides the only implementations used in
+this slice: `FakeSpeechToTextAdapter`, `FakeTextToSpeechAdapter`, and
+`FakeAssistantAdapter`, plus `DegradedFakeAssistantAdapter` (which always fails
+to exercise the degraded-capability path). Future adapters must preserve the
+same method signatures without changing `src/onecx_pipecat/session.py`.
+
+== Session lifecycle and cleanup
+
+Both `STOP_SESSION` and a client disconnect route through
+`VoiceSession.close()` in `src/onecx_pipecat/session.py`. `close` is idempotent
+and calls `aclose()` on all three adapters exactly once, releasing every
+adapter resource and asynchronous task deterministically.
+
+== Close codes
+
+`src/onecx_pipecat/transport/websocket.py` assigns two application-defined
+WebSocket close codes in the RFC 6455 private-use range (4000–4999):
+
+|===
+|Close code |Meaning
+
+|`4401`
+|Missing or invalid `tenant_id`/`principal_id`.
+
+|`4400`
+|Unsupported `session_type`.
+|===
