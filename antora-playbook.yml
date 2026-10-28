@@ -10,4 +10,5 @@ content:
 
 ui:
   bundle:
-    url: https://static.antora.org/antora-ui-default/3.1.11/ui-bundle-assembler.tar.gz
+    url: https://github.com/onecx/docs-antora-ui/releases/latest/download/ui-bundle.zip
+    snapshot: true
