@@ -26,7 +26,9 @@ from onecx_pipecat.models import (
 
 
 class PermissionAdapter(Protocol):
-    async def has_voice_permission(self, principal: Principal, apm_principal_token: str) -> bool:
+    async def has_voice_permission(
+        self, principal: Principal, apm_principal_token: str, authorization: str
+    ) -> bool:
         """Whether the user already has the OneCX voice permission."""
         ...
 
@@ -34,9 +36,13 @@ class PermissionAdapter(Protocol):
 class HttpPermissionAdapter:
     """Check the voice permission via ``POST /v1/permissions/user/{productName}/{appId}``.
 
-    permission-svc resolves the user's roles from the ``token`` and returns the
-    application's permissions as ``{resource: [actions]}``. Any error fails
-    closed (no voice permission).
+    The request matches the OneCX permissions Quarkus extension: the body
+    ``token`` is the user's ``Authorization`` value (the access token) and
+    ``apm-principal-token`` is propagated as a header. permission-svc reads the
+    user's roles from the access token (by default ``realm_access/roles``,
+    which Keycloak does not put into the ID token) and returns the
+    application's permissions as ``{resource: [actions]}``. A missing access
+    token or any error fails closed (no voice permission).
     """
 
     def __init__(
@@ -50,7 +56,11 @@ class HttpPermissionAdapter:
         """Inject a client (used by tests to avoid a live network call)."""
         self._client = client
 
-    async def has_voice_permission(self, principal: Principal, apm_principal_token: str) -> bool:
+    async def has_voice_permission(
+        self, principal: Principal, apm_principal_token: str, authorization: str
+    ) -> bool:
+        if not authorization:
+            return False
         s = self._settings
         client = self._client or httpx.AsyncClient()
         try:
@@ -58,7 +68,7 @@ class HttpPermissionAdapter:
                 f"{s.base_url}/v1/permissions/user/{s.voice_product_name}/{s.voice_app_id}",
                 headers={"apm-principal-token": apm_principal_token},
                 auth=self._service_auth,
-                json={"token": apm_principal_token},
+                json={"token": authorization},
             )
             if not response.is_success:
                 return False

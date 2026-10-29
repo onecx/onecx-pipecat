@@ -89,11 +89,15 @@ class FakeAgentConfig:
 class FakePermission:
     def __init__(self) -> None:
         self._denied: set[str] = set()
+        self.authorizations: list[str] = []
 
     def deny_voice(self, subject: str) -> None:
         self._denied.add(subject)
 
-    async def has_voice_permission(self, principal: Principal, apm_principal_token: str) -> bool:
+    async def has_voice_permission(
+        self, principal: Principal, apm_principal_token: str, authorization: str
+    ) -> bool:
+        self.authorizations.append(authorization)
         return principal.subject not in self._denied
 
 

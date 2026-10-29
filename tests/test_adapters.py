@@ -831,11 +831,18 @@ async def test_voice_permission_found_in_application_permissions():
     seen: list[httpx.Request] = []
     body = _app_permissions({"CHAT": ["USE"], "VOICE": ["VIEW", "USE"]})
     perm = _permission_adapter(200, body, seen)
-    assert await perm.has_voice_permission(_PRINCIPAL, "tok") is True
+    assert await perm.has_voice_permission(_PRINCIPAL, "tok", "Bearer access") is True
     assert seen[0].method == "POST"
     assert str(seen[0].url) == "http://perm/v1/permissions/user/onecx-ai/onecx-ai-ui"
     assert seen[0].headers["apm-principal-token"] == "tok"
-    assert json.loads(seen[0].content) == {"token": "tok"}
+    assert json.loads(seen[0].content) == {"token": "Bearer access"}
+
+
+async def test_voice_permission_without_access_token_is_denied():
+    seen: list[httpx.Request] = []
+    perm = _permission_adapter(200, _app_permissions({"VOICE": ["USE"]}), seen)
+    assert await perm.has_voice_permission(_PRINCIPAL, "tok", "") is False
+    assert seen == []
 
 
 @pytest.mark.parametrize(
@@ -843,13 +850,13 @@ async def test_voice_permission_found_in_application_permissions():
 )
 async def test_missing_voice_permission_is_denied(permissions):
     perm = _permission_adapter(200, _app_permissions(permissions))
-    assert await perm.has_voice_permission(_PRINCIPAL, "tok") is False
+    assert await perm.has_voice_permission(_PRINCIPAL, "tok", "Bearer access") is False
 
 
 @pytest.mark.parametrize("status", [400, 401, 500])
 async def test_voice_permission_fails_closed_on_error_status(status):
     perm = _permission_adapter(status, {"errorCode": "x"})
-    assert await perm.has_voice_permission(_PRINCIPAL, "tok") is False
+    assert await perm.has_voice_permission(_PRINCIPAL, "tok", "Bearer access") is False
 
 
 async def test_voice_permission_fails_closed_when_unreachable():
@@ -858,7 +865,7 @@ async def test_voice_permission_fails_closed_when_unreachable():
 
     perm = HttpPermissionAdapter(PermissionSettings(base_url="http://perm"))
     perm.set_client(_client(handler))
-    assert await perm.has_voice_permission(_PRINCIPAL, "tok") is False
+    assert await perm.has_voice_permission(_PRINCIPAL, "tok", "Bearer access") is False
 
 
 # --- tool policy: resolved per MCP server by ai-provider -------------------

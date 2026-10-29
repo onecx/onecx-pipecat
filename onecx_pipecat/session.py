@@ -294,7 +294,7 @@ class VoiceSession:
 
         # 3. Check the user's existing OneCX voice permission.
         if not await self._container.permission.has_voice_permission(
-            principal, apm_principal_token
+            principal, apm_principal_token, authorization
         ):
             return self._fail_start("voice_not_permitted", "user lacks the voice permission")
 

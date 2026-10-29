@@ -16,8 +16,9 @@ The client streams audio; the server detects the turns (or, with
 == Authentication and start
 
 The connection is accepted without authentication and is authenticated by the
-first client message. A `start_session` command carries a OneCX token in the
-`apm_principal_token` field. The session then:
+first client message. A `start_session` command carries the user's OneCX
+tokens in the `apm_principal_token` and `authorization` fields. The session
+then:
 
 . verifies the token (signature, issuer, expiry) against the Keycloak JWKS;
 . checks chat access for `chat_id` with the token propagated to the chat service;
@@ -25,7 +26,8 @@ first client message. A `start_session` command carries a OneCX token in the
 `HUMAN`/`ASSISTANT` messages) to seed the LLM context after the system prompt;
 a failure fails the start with `chat_not_accessible`, because a session that
 silently forgot the conversation would be wrong;
-. checks the user's existing voice permission;
+. checks the user's existing voice permission with the `authorization` access
+token;
 . pins the agent configuration (provider, model, system prompt, skills, MCP
 servers) for the whole session;
 . builds the LLM (provider credentials are resolved from
