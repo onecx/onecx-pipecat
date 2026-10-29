@@ -824,7 +824,7 @@ def _permission_adapter(status: int, body: dict | None = None, seen: list | None
 
 
 def _app_permissions(permissions: dict) -> dict:
-    return {"appId": "onecx-ai-ui", "productName": "onecx-ai", "permissions": permissions}
+    return {"appId": "onecx-chat-ui", "productName": "onecx-chat", "permissions": permissions}
 
 
 async def test_voice_permission_found_in_application_permissions():
@@ -833,7 +833,7 @@ async def test_voice_permission_found_in_application_permissions():
     perm = _permission_adapter(200, body, seen)
     assert await perm.has_voice_permission(_PRINCIPAL, "tok", "Bearer access") is True
     assert seen[0].method == "POST"
-    assert str(seen[0].url) == "http://perm/v1/permissions/user/onecx-ai/onecx-ai-ui"
+    assert str(seen[0].url) == "http://perm/v1/permissions/user/onecx-chat/onecx-chat-ui"
     assert seen[0].headers["apm-principal-token"] == "tok"
     assert json.loads(seen[0].content) == {"token": "Bearer access"}
 

@@ -55,8 +55,8 @@ chart defaults to Quarkus paths that do not exist here).
 secret are injected as `ONECX_AUTH__CLIENT_ID` and `ONECX_AUTH__CLIENT_SECRET`.
 * The Keycloak realm URL (`global.oidc.client.url` or `app.oidc.client.url`) is
 injected as `ONECX_AUTH__ISSUER`.
-* No database, no permission operator (the `VOICE`/`USE` permission belongs to
-`onecx-ai-ui`) and routing disabled.
+* No database, no permission operator (the `VOICE`/`USE` permission is declared
+by the onecx-chat-ui chart) and routing disabled.
 
 == Per-environment setup
 

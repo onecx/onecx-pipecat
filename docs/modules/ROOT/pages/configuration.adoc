@@ -156,11 +156,11 @@ provider is selected. Each profile pairs an AWS Transcribe language code
 permission.
 
 | `permission.voice_product_name`
-| `onecx-ai`
+| `onecx-chat`
 | `productName` of the application that owns the voice permission.
 
 | `permission.voice_app_id`
-| `onecx-ai-ui`
+| `onecx-chat-ui`
 | `appId` of the application that owns the voice permission.
 
 | `permission.voice_resource`

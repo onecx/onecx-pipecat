@@ -123,9 +123,10 @@ class PermissionSettings(BaseSettings):
     # Base URL of onecx-permission-svc (``POST /v1/permissions/user/{productName}/{appId}``).
     base_url: str = "http://onecx-permission-svc:8080"
     # The OneCX permission that grants voice: ``voice_action`` on ``voice_resource``
-    # of application ``voice_app_id`` in product ``voice_product_name``.
-    voice_product_name: str = "onecx-ai"
-    voice_app_id: str = "onecx-ai-ui"
+    # of application ``voice_app_id`` in product ``voice_product_name``. The
+    # onecx-chat-ui Helm chart declares it.
+    voice_product_name: str = "onecx-chat"
+    voice_app_id: str = "onecx-chat-ui"
     voice_resource: str = "VOICE"
     voice_action: str = "USE"
 
