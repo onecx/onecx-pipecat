@@ -33,6 +33,8 @@ from pipecat.frames.frames import (
     ProposedUserStoppedSpeakingFrame,
     TranscriptionFrame,
     TTSTextFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
 )
 from pipecat.serializers.base_serializer import FrameSerializer
 
@@ -44,6 +46,8 @@ from onecx_pipecat.protocol import (
     Event,
     Interrupted,
     Transcript,
+    UserStartedSpeaking,
+    UserStoppedSpeaking,
 )
 
 BAD_COMMAND = {"type": "bad_command"}
@@ -67,6 +71,10 @@ def wire_event(frame: Frame) -> Event | None:
         return BotStartedSpeaking()
     if isinstance(frame, BotStoppedSpeakingFrame):
         return BotStoppedSpeaking()
+    if isinstance(frame, UserStartedSpeakingFrame):
+        return UserStartedSpeaking()
+    if isinstance(frame, UserStoppedSpeakingFrame):
+        return UserStoppedSpeaking()
     if isinstance(frame, InterruptionFrame):
         return Interrupted()
     return None

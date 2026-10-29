@@ -117,6 +117,12 @@ LLM context at session start.
 | `16000`
 | Expected audio sample rate in hertz.
 
+| `speech.turn_detection`
+| `vad`
+| Who detects user turns: `vad` (server-side Silero VAD; the client only
+streams audio) or `client` (push-to-talk via `user_started_speaking` /
+`user_stopped_speaking`).
+
 | `speech.region`
 | `us-east-1`
 | AWS region the Transcribe and Polly profiles live in (`aws` provider only).

@@ -21,6 +21,7 @@ from pipecat.frames.frames import (
     ProposedUserStoppedSpeakingFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.settings import TTSSettings
@@ -29,9 +30,15 @@ from pipecat.utils.time import time_now_iso8601
 
 IN_MEMORY_TRANSCRIPT = "in-memory transcript"
 
+# Speech boundaries from the client (push-to-talk) or from the VAD analyzer.
+# A VAD start is not a reset: the VAD reports speech only after hearing some of
+# it, and that audio belongs to the utterance.
+_SPEECH_STARTED = (ProposedUserStartedSpeakingFrame,)
+_SPEECH_STOPPED = (ProposedUserStoppedSpeakingFrame, VADUserStoppedSpeakingFrame)
+
 
 class InMemorySTT(FrameProcessor):
-    """Emits a fixed transcript when the user turn ends after audio was received."""
+    """Emits a fixed transcript when speech ends after audio was received."""
 
     def __init__(self, transcript: str = IN_MEMORY_TRANSCRIPT, **kwargs: Any) -> None:
         super().__init__(name="InMemorySTT", **kwargs)
@@ -42,9 +49,9 @@ class InMemorySTT(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, InputAudioRawFrame) and frame.audio:
             self._heard_audio = True
-        elif isinstance(frame, ProposedUserStartedSpeakingFrame):
+        elif isinstance(frame, _SPEECH_STARTED):
             self._heard_audio = False
-        elif isinstance(frame, ProposedUserStoppedSpeakingFrame) and self._heard_audio:
+        elif isinstance(frame, _SPEECH_STOPPED) and self._heard_audio:
             self._heard_audio = False
             await self.push_frame(
                 InterimTranscriptionFrame(self._transcript, "user", time_now_iso8601())

@@ -3,8 +3,9 @@
 The handshake commands (``start_session``) are plain JSON text messages handled
 by the endpoint before the Pipecat pipeline starts. Once the session is READY
 the socket belongs to the pipeline's ``OnecxFrameSerializer``,
-which additionally understands ``audio``, ``user_started_speaking`` and
-``user_stopped_speaking`` inbound and the streaming events below outbound.
+which additionally understands ``audio`` (and, with client turn detection,
+``user_started_speaking`` / ``user_stopped_speaking``) inbound and the
+streaming events below outbound.
 
 Commands are what a client asks a session to do; events are what the session
 emits back. The vocabulary is independent of the carrier so the WebSocket can
@@ -89,6 +90,18 @@ class BotStoppedSpeaking(BaseModel):
     kind: Literal["bot_stopped_speaking"] = "bot_stopped_speaking"
 
 
+class UserStartedSpeaking(BaseModel):
+    """A user turn started; arriving while the bot speaks, it is a barge-in."""
+
+    kind: Literal["user_started_speaking"] = "user_started_speaking"
+
+
+class UserStoppedSpeaking(BaseModel):
+    """The user turn ended; the transcript now goes to the LLM."""
+
+    kind: Literal["user_stopped_speaking"] = "user_stopped_speaking"
+
+
 class Interrupted(BaseModel):
     """The user barged in; the client must drop any queued assistant audio."""
 
@@ -129,6 +142,8 @@ Event = (
     | AssistantAudio
     | BotStartedSpeaking
     | BotStoppedSpeaking
+    | UserStartedSpeaking
+    | UserStoppedSpeaking
     | Interrupted
     | TurnComplete
     | ErrorEvent

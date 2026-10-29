@@ -54,9 +54,14 @@ transport.input → session control → STT → transcript events → user aggre
   → LLM → TTS → wire events → transport.output → assistant aggregator
 ```
 
-Turns are delimited by the client (`user_started_speaking` / `user_stopped_speaking`)
-through Pipecat's external user turn strategies; a started turn interrupts the
-bot. Persistence hangs on the aggregators' turn events and `turn_complete` is
+Turns are detected on the server by default (`speech.turn_detection=vad`): a
+Silero VAD in the user aggregator starts the user turn on speech, which
+interrupts the bot, and ends it after a pause once a transcript arrived. The
+client then only streams audio. With `turn_detection=client` the client
+delimits turns (`user_started_speaking` / `user_stopped_speaking`, push-to-talk)
+through Pipecat's external user turn strategies. Either way the server reports
+`user_started_speaking` / `user_stopped_speaking`. Persistence hangs on the
+aggregators' turn events and `turn_complete` is
 sent only after the assistant entry was stored. Service `ErrorFrame`s become
 non-fatal `stt_failed` / `llm_failed` / `tts_failed` events. See the voice
 session documentation for the full protocol.
@@ -88,7 +93,7 @@ that the pipeline's serializer carries:
 
 | Client → server | Server → client |
 |---|---|
-| `user_started_speaking`, `audio` (base64 PCM16), `user_stopped_speaking` | `transcript`, `assistant_text`, `assistant_audio`, `bot_started_speaking`, `bot_stopped_speaking`, `interrupted`, `turn_complete` |
+| `audio` (base64 PCM16); with client turn detection also `user_started_speaking`, `user_stopped_speaking` | `transcript`, `user_started_speaking`, `user_stopped_speaking`, `assistant_text`, `assistant_audio`, `bot_started_speaking`, `bot_stopped_speaking`, `interrupted`, `turn_complete` |
 | `refresh_token`, `stop` | `error` (typed code), `session_closed` (reason) |
 
 Error codes: `authentication_failed`, `chat_not_accessible`,
@@ -186,7 +191,9 @@ Diagram: [session-sequence.drawio](docs/diagrams/session-sequence.drawio)
   as the spoken text without a marker (chat-svc `Message` has no status), and
   tool entries are not persisted. The history is loaded once at start, so
   messages typed into the chat during a voice session are not seen by it.
-- Server-side VAD (the client currently signals turn boundaries, push-to-talk).
+- Server VAD relies on the browser's echo cancellation; without it the bot's
+  own voice can open a user turn and interrupt itself. A minimum-words start
+  strategy would harden this.
 - Support `ALWAYS_ASK` tool proposals and decisions. The models exist, but the
   flow does not.
 - OAuth provider authentication for the LLM (only API-key credentials work).

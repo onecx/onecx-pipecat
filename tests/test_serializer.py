@@ -17,6 +17,8 @@ from pipecat.frames.frames import (
     TextFrame,
     TranscriptionFrame,
     TTSTextFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
 )
 
 from onecx_pipecat.pipeline.serializer import BAD_COMMAND, OnecxFrameSerializer
@@ -104,6 +106,13 @@ async def test_bot_speaking_and_interruption_events(serializer):
     assert (await _event(serializer, BotStartedSpeakingFrame()))["kind"] == "bot_started_speaking"
     assert (await _event(serializer, BotStoppedSpeakingFrame()))["kind"] == "bot_stopped_speaking"
     assert (await _event(serializer, InterruptionFrame()))["kind"] == "interrupted"
+
+
+async def test_user_turn_boundaries_are_reported(serializer):
+    started = await _event(serializer, UserStartedSpeakingFrame())
+    stopped = await _event(serializer, UserStoppedSpeakingFrame())
+    assert started == {"kind": "user_started_speaking"}
+    assert stopped == {"kind": "user_stopped_speaking"}
 
 
 @pytest.mark.parametrize(

@@ -92,6 +92,10 @@ class SpeechSettings(BaseSettings):
     stt_provider: str = "inmemory"
     tts_provider: str = "inmemory"
     sample_rate_hz: int = 16000
+    # "vad": Pipecat detects speech (Silero VAD) and ends the user turn after a
+    # pause, so the client only streams audio. "client": the client delimits
+    # turns with user_started_speaking / user_stopped_speaking (push-to-talk).
+    turn_detection: Literal["vad", "client"] = "vad"
     # AWS region the Transcribe and Polly profiles live in (aws provider only).
     region: str = "us-east-1"
     # Fallback when a pinned agent configuration does not specify a language.

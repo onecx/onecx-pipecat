@@ -58,6 +58,7 @@ from onecx_pipecat.services.speech import (
     UnsupportedLanguageError,
     build_stt_service,
     build_tts_service,
+    build_vad_analyzer,
 )
 
 _NORMAL_CLOSURE = 1000
@@ -195,6 +196,7 @@ class VoiceSession:
                 history=self._history,
                 save_entry=self._save_entry,
                 dispatch=self.dispatch,
+                vad_analyzer=build_vad_analyzer(self._container.settings),
             )
             try:
                 await run_worker(self._worker)

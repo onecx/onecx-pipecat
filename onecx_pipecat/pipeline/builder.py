@@ -3,10 +3,13 @@
 ``transport.input() -> control -> stt -> transcripts -> user aggregator -> llm
 -> tts -> wire events -> transport.output() -> assistant aggregator``
 
-Turn boundaries come from the client (``user_started_speaking`` /
-``user_stopped_speaking``) through Pipecat's external turn strategies, so the
-user aggregator, interruption handling and the assistant aggregator are stock
-Pipecat; only the OneCX pieces (control, wire events, persistence) are custom.
+Turn boundaries come either from a VAD analyzer in the user aggregator
+(``speech.turn_detection=vad``: the user turn starts on speech and ends after a
+pause once a transcript arrived) or from the client (``user_started_speaking`` /
+``user_stopped_speaking``) through Pipecat's external turn strategies. Either
+way the user aggregator, interruption handling and the assistant aggregator are
+stock Pipecat; only the OneCX pieces (control, wire events, persistence) are
+custom.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import WebSocket
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.audio.vad.vad_analyzer import VADAnalyzer
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
@@ -22,6 +26,8 @@ from pipecat.frames.frames import (
     OutputTransportMessageUrgentFrame,
     TranscriptionFrame,
     TTSTextFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -35,7 +41,8 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
-from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
+from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserTurnStrategies
 
 from onecx_pipecat.config import Settings
 from onecx_pipecat.models import VoiceEntry
@@ -64,6 +71,7 @@ def build_voice_pipeline(
     history: list[dict[str, str]],
     save_entry: Callable[[VoiceEntry], Awaitable[str]],
     dispatch: Callable[[Command], Awaitable[list[Event]]],
+    vad_analyzer: VADAnalyzer | None = None,
 ) -> PipelineWorker:
     sample_rate = settings.speech.sample_rate_hz
     transport = FastAPIWebsocketTransport(
@@ -86,10 +94,7 @@ def build_voice_pipeline(
         messages=[{"role": "system", "content": system_prompt}, *history],
         **({"tools": tools} if tools.standard_tools else {}),
     )
-    aggregators = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies()),
-    )
+    aggregators = LLMContextAggregatorPair(context, user_params=_user_params(vad_analyzer))
     user, assistant = aggregators.user(), aggregators.assistant()
     attach_persistence(user, assistant, save_entry, emit)
 
@@ -103,7 +108,12 @@ def build_voice_pipeline(
             llm,
             tts,
             WireEvents(
-                urgent=(BotStartedSpeakingFrame, BotStoppedSpeakingFrame),
+                urgent=(
+                    BotStartedSpeakingFrame,
+                    BotStoppedSpeakingFrame,
+                    UserStartedSpeakingFrame,
+                    UserStoppedSpeakingFrame,
+                ),
                 ordered=(TTSTextFrame,),
             ),
             transport.output(),
@@ -129,3 +139,14 @@ def build_voice_pipeline(
         await worker.cancel(reason="client_disconnected")
 
     return worker
+
+
+def _user_params(vad_analyzer: VADAnalyzer | None) -> LLMUserAggregatorParams:
+    if vad_analyzer is None:
+        return LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies())
+    # Default start strategies (VAD, transcription); the turn stops after a
+    # pause once a transcript arrived, without loading a turn-detection model.
+    return LLMUserAggregatorParams(
+        vad_analyzer=vad_analyzer,
+        user_turn_strategies=UserTurnStrategies(stop=[SpeechTimeoutUserTurnStopStrategy()]),
+    )
