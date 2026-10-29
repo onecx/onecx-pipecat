@@ -48,6 +48,12 @@ def test_chat_base_url_env_override(monkeypatch):
     assert s.chat.base_url == "https://chat.other"
 
 
+def test_turn_detection_defaults_to_server_vad_and_can_be_left_to_the_client(monkeypatch):
+    assert Settings(_env_file=None).speech.turn_detection == "vad"
+    monkeypatch.setenv("ONECX_SPEECH__TURN_DETECTION", "client")
+    assert Settings(_env_file=None).speech.turn_detection == "client"
+
+
 def test_keycloak_env_names_configure_auth(monkeypatch):
     monkeypatch.setenv("KEYCLOAK_SERVER_URL", "https://kc.example/")
     monkeypatch.setenv("KEYCLOAK_REALM", "onecx")

@@ -118,19 +118,22 @@ when the cap is exceeded.
 == Permission
 
 * Protocol: `PermissionAdapter` —
-  `has_voice_permission(principal, apm_principal_token) -> bool`
+  `has_voice_permission(principal, apm_principal_token, authorization) -> bool`
 * Implementation: `HttpPermissionAdapter`
 * Tool policy: `resolve_tool_permission(snapshot, tool)`,
   `allowed_tools(snapshot, discovered)` (pure functions)
 
-`HttpPermissionAdapter` uses the same public API as the OneCX permissions
-Quarkus extension:
+`HttpPermissionAdapter` calls the same public API the same way as the OneCX
+permissions Quarkus extension:
 `POST {permission.base_url}/v1/permissions/user/{voice_product_name}/{voice_app_id}`
-with `{"token": <apm-principal-token>}`. permission-svc resolves the user's
-roles from the token and returns `{"permissions": {resource: [actions]}}`;
+with `{"token": <authorization>}`, the user's `Authorization` value from
+`start_session`, and `apm-principal-token` as a header. permission-svc resolves
+the user's roles from that access token (by default `realm_access/roles`,
+which Keycloak does not put into the ID token) and returns
+`{"permissions": {resource: [actions]}}`;
 voice is granted when `permission.voice_action` is listed under
-`permission.voice_resource`. Any error status or unreachable endpoint fails
-closed (no voice permission).
+`permission.voice_resource`. A missing `authorization`, any error status, or
+an unreachable endpoint fails closed (no voice permission).
 
 Tool policy is data resolved by ai-provider, not by Pipecat. Actions use the
 canonical vocabulary `DENY`, `ALWAYS_ASK`, and `ALWAYS_ALLOW`. For a

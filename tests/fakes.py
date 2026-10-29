@@ -7,12 +7,14 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
+from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADParams
+
 from onecx_pipecat.adapters.agent_config import AgentConfigError
 from onecx_pipecat.adapters.auth import AuthenticationError
 from onecx_pipecat.adapters.chat import ChatAccessError
 from onecx_pipecat.adapters.mcp import McpDiscovery, McpToolResult
 from onecx_pipecat.adapters.persistence import PersistenceError
-from onecx_pipecat.config import LlmSettings, Settings
+from onecx_pipecat.config import LlmSettings, Settings, SpeechSettings
 from onecx_pipecat.container import AppContainer
 from onecx_pipecat.models import (
     AgentConfigSnapshot,
@@ -87,11 +89,15 @@ class FakeAgentConfig:
 class FakePermission:
     def __init__(self) -> None:
         self._denied: set[str] = set()
+        self.authorizations: list[str] = []
 
     def deny_voice(self, subject: str) -> None:
         self._denied.add(subject)
 
-    async def has_voice_permission(self, principal: Principal, apm_principal_token: str) -> bool:
+    async def has_voice_permission(
+        self, principal: Principal, apm_principal_token: str, authorization: str
+    ) -> bool:
+        self.authorizations.append(authorization)
         return principal.subject not in self._denied
 
 
@@ -135,8 +141,17 @@ class FakeMcp:
 def fake_container(
     *, token: str = "tok-user", chat_id: str = "chat-1", agent_id: str = "onecx-agent"
 ) -> AppContainer:
-    """An app container with fakes for every OneCX boundary and one usable user/chat/agent."""
-    container = AppContainer(Settings(llm=LlmSettings(provider_override="inmemory")))
+    """An app container with fakes for every OneCX boundary and one usable user/chat/agent.
+
+    Turns are delimited by the client (push-to-talk) so tests drive them
+    explicitly; VAD tests switch ``speech.turn_detection`` and use ``FakeVAD``.
+    """
+    container = AppContainer(
+        Settings(
+            llm=LlmSettings(provider_override="inmemory"),
+            speech=SpeechSettings(turn_detection="client"),
+        )
+    )
     auth, chat, agent_config = FakeAuth(), FakeChat(), FakeAgentConfig()
     auth.seed(token, subject="user-1", tenant_id="local", roles=["voice"])
     chat.register(chat_id, topic="general")
@@ -198,3 +213,20 @@ class FakePersistence:
         if self.fail_history:
             raise PersistenceError("history boom")
         return self.history_messages[-limit:]
+
+
+class FakeVAD(VADAnalyzer):
+    """A deterministic VAD: any non-silent 10 ms frame is speech.
+
+    Start/stop windows are short so tests can open a turn with a few non-zero
+    chunks and close it with ~100 ms of zeros.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(params=VADParams(min_volume=0.0, start_secs=0.02, stop_secs=0.1))
+
+    def num_frames_required(self) -> int:
+        return 160
+
+    def voice_confidence(self, buffer: bytes) -> float:
+        return 1.0 if any(buffer) else 0.0

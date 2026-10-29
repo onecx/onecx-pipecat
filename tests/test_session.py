@@ -94,6 +94,13 @@ async def test_start_without_voice_permission_fails():
     _assert_start_rejected(session, events, "voice_not_permitted")
 
 
+async def test_start_checks_voice_permission_with_the_access_token():
+    container = _container()
+    session = _session(container)
+    await session.dispatch(_start(authorization="Bearer access-user"))
+    assert container.permission.authorizations == ["Bearer access-user"]
+
+
 async def test_start_verifies_token_from_message_not_url():
     """The token is validated against the auth adapter, not the query string."""
     seen: list[str] = []

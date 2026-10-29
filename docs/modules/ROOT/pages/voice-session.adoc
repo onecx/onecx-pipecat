@@ -10,13 +10,15 @@ socket to it. Pipecat's `FastAPIWebsocketTransport` and the OneCX frame
 serializer carry all further traffic.
 
 NOTE: Protocol version 2 replaces the earlier request/response turn protocol.
-The client now streams audio and signals push-to-talk boundaries explicitly.
+The client streams audio; the server detects the turns (or, with
+`speech.turn_detection=client`, the client signals push-to-talk boundaries).
 
 == Authentication and start
 
 The connection is accepted without authentication and is authenticated by the
-first client message. A `start_session` command carries a OneCX token in the
-`apm_principal_token` field. The session then:
+first client message. A `start_session` command carries the user's OneCX
+tokens in the `apm_principal_token` and `authorization` fields. The session
+then:
 
 . verifies the token (signature, issuer, expiry) against the Keycloak JWKS;
 . checks chat access for `chat_id` with the token propagated to the chat service;
@@ -24,7 +26,8 @@ first client message. A `start_session` command carries a OneCX token in the
 `HUMAN`/`ASSISTANT` messages) to seed the LLM context after the system prompt;
 a failure fails the start with `chat_not_accessible`, because a session that
 silently forgot the conversation would be wrong;
-. checks the user's existing voice permission;
+. checks the user's existing voice permission with the `authorization` access
+token;
 . pins the agent configuration (provider, model, system prompt, skills, MCP
 servers) for the whole session;
 . builds the LLM (provider credentials are resolved from
@@ -55,8 +58,12 @@ transport.input() -> session control -> STT -> transcript events -> user aggrega
 agent's configured OpenAI, Ollama or Anthropic provider). With the `inmemory`
 speech provider and `ONECX_LLM__PROVIDER_OVERRIDE=inmemory` deterministic
 in-memory services are used for tests and local development.
-* The user and assistant context aggregators use `ExternalUserTurnStrategies`:
-turns are delimited by the client (push-to-talk), there is no server-side VAD.
+* The user aggregator detects turns according to `speech.turn_detection`:
+** `vad` (default): a Silero VAD (bundled model, CPU) starts the user turn when
+it hears speech; the turn ends `0.6` s after speech stops once a transcript
+arrived (`SpeechTimeoutUserTurnStopStrategy`). The client only streams audio.
+** `client`: `ExternalUserTurnStrategies`; turns are delimited by the client
+(push-to-talk).
 * The LLM context holds the composed system prompt and one tool schema: the
 allowed MCP tools plus `activate_skill` when the agent has usable skills.
 MCP tool calls go through `VoiceSession.invoke_tool`, which keeps the
@@ -76,13 +83,13 @@ Messages are JSON objects with a `type` field.
 | Handshake only. `agent_id`, `chat_id`, `apm_principal_token`, optional `authorization`.
 
 | `user_started_speaking`
-| Push-to-talk press. Starts a user turn and interrupts the assistant if it is speaking (barge-in).
+| Client turn detection only: push-to-talk press. Starts a user turn and interrupts the assistant if it is speaking (barge-in).
 
 | `audio`
-| `audio`: base64 PCM16 mono at `speech.sample_rate_hz`. Send any number of chunks between started and stopped.
+| `audio`: base64 PCM16 mono at `speech.sample_rate_hz`. With VAD, stream continuously from `session_ready` on (send silence while muted or stop sending); otherwise send chunks between started and stopped.
 
 | `user_stopped_speaking`
-| Push-to-talk release. Ends the user turn; the transcript goes to the LLM.
+| Client turn detection only: push-to-talk release. Ends the user turn; the transcript goes to the LLM.
 
 | `refresh_token`
 | `apm_principal_token` (and optional `authorization`). Replaces the session tokens; must belong to the same user.
@@ -103,6 +110,7 @@ Anything else (invalid JSON, unknown `type`, invalid base64) is answered with
 | `session_ready` | Handshake done; carries `session_id`, `agent_id`, `schema_version`, `protocol_version`.
 | `degraded_capability` | An MCP server was unreachable at discovery; its tools are missing.
 | `transcript` | `text` and `state` (`PARTIAL` interim, `FINAL`). Only the final text becomes a durable entry.
+| `user_started_speaking` / `user_stopped_speaking` | A user turn started (while the assistant speaks: a barge-in) or ended. Sent in both turn-detection modes.
 | `assistant_text` | A streamed chunk of the text being spoken (`text`), in step with the audio.
 | `assistant_audio` | Base64 PCM16 `audio` with `sample_rate`, `num_channels`.
 | `bot_started_speaking` / `bot_stopped_speaking` | Playback state of the assistant.
@@ -112,15 +120,16 @@ Anything else (invalid JSON, unknown `type`, invalid base64) is answered with
 | `session_closed` | `reason`; the last message before the socket closes.
 |===
 
-Example turn:
+Example turn with server VAD:
 
 [source,json]
 ----
-{"type": "user_started_speaking"}
 {"type": "audio", "audio": "AAAB..."}
-{"type": "user_stopped_speaking"}
+{"type": "audio", "audio": "AAAB..."}
 
+{"kind": "user_started_speaking"}
 {"kind": "transcript", "text": "what is the weather", "state": "FINAL"}
+{"kind": "user_stopped_speaking"}
 {"kind": "bot_started_speaking"}
 {"kind": "assistant_audio", "audio": "AAAA...", "sample_rate": 16000, "num_channels": 1}
 {"kind": "assistant_text", "text": "It is sunny."}
@@ -128,12 +137,16 @@ Example turn:
 {"kind": "turn_complete", "entry_id": "abc:2"}
 ----
 
+With client turn detection the audio is wrapped in `user_started_speaking` and
+`user_stopped_speaking` commands.
+
 == Turns, barge-in and persistence
 
-* *Turn:* `user_started_speaking`, audio, `user_stopped_speaking` (Pipecat
-external turn strategies). The user aggregator adds the final transcript to the
+* *Turn:* speech followed by a pause (VAD) or `user_started_speaking`, audio,
+`user_stopped_speaking` (client). The user aggregator adds the final transcript to the
 LLM context and triggers the LLM; the reply is spoken sentence by sentence.
-* *Barge-in:* `user_started_speaking` while the assistant speaks makes the user
+* *Barge-in:* a user turn that starts while the assistant speaks (detected
+speech, or `user_started_speaking`) makes the user
 aggregator broadcast an `InterruptionFrame`. Pending LLM and TTS output is
 cancelled, the output transport drops queued audio, the client receives
 `interrupted`, and the assistant aggregator closes the turn as interrupted.

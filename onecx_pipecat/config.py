@@ -92,6 +92,10 @@ class SpeechSettings(BaseSettings):
     stt_provider: str = "inmemory"
     tts_provider: str = "inmemory"
     sample_rate_hz: int = 16000
+    # "vad": Pipecat detects speech (Silero VAD) and ends the user turn after a
+    # pause, so the client only streams audio. "client": the client delimits
+    # turns with user_started_speaking / user_stopped_speaking (push-to-talk).
+    turn_detection: Literal["vad", "client"] = "vad"
     # AWS region the Transcribe and Polly profiles live in (aws provider only).
     region: str = "us-east-1"
     # Fallback when a pinned agent configuration does not specify a language.
@@ -119,9 +123,10 @@ class PermissionSettings(BaseSettings):
     # Base URL of onecx-permission-svc (``POST /v1/permissions/user/{productName}/{appId}``).
     base_url: str = "http://onecx-permission-svc:8080"
     # The OneCX permission that grants voice: ``voice_action`` on ``voice_resource``
-    # of application ``voice_app_id`` in product ``voice_product_name``.
-    voice_product_name: str = "onecx-ai"
-    voice_app_id: str = "onecx-ai-ui"
+    # of application ``voice_app_id`` in product ``voice_product_name``. The
+    # onecx-chat-ui Helm chart declares it.
+    voice_product_name: str = "onecx-chat"
+    voice_app_id: str = "onecx-chat-ui"
     voice_resource: str = "VOICE"
     voice_action: str = "USE"
 

@@ -8,6 +8,7 @@ from onecx_pipecat.config import AwsSpeechProfile, Settings, SpeechSettings
 from onecx_pipecat.services.inmemory import InMemorySTT, InMemoryTTS
 
 if TYPE_CHECKING:
+    from pipecat.audio.vad.vad_analyzer import VADAnalyzer
     from pipecat.processors.frame_processor import FrameProcessor
 
 # AWS Transcribe drops a stream that receives no audio for a while; a voice
@@ -65,3 +66,13 @@ def build_tts_service(settings: Settings, language: str) -> FrameProcessor:
             ),
         )
     return InMemoryTTS(sample_rate=speech.sample_rate_hz)
+
+
+def build_vad_analyzer(settings: Settings) -> VADAnalyzer | None:
+    """Silero VAD for server-side turn detection; None when the client delimits turns."""
+    speech = settings.speech
+    if speech.turn_detection != "vad":
+        return None
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+
+    return SileroVADAnalyzer(sample_rate=speech.sample_rate_hz)
