@@ -52,10 +52,6 @@ ONECX_PERMISSION__VOICE_RESOURCE=VOICE
 derived as `{server_url}/realms/{realm}`. Expected JWT issuer, validated by `JwtAuthAdapter` when verifying the
 `apm_principal_token` carried in `start_session`.
 
-| `auth.audience`
-| `onecx-pipecat`
-| Expected JWT audience, validated by `JwtAuthAdapter`.
-
 | `auth.token_claim_subject`
 | `sub`
 | JWT claim name read as the authenticated subject.

@@ -30,7 +30,6 @@ class AuthSettings(BaseSettings):
         validation_alias=AliasChoices("KEYCLOAK_REALM", "ONECX_AUTH__REALM"),
     )
     issuer: str = "https://auth.example"
-    audience: str = "onecx-pipecat"
     token_claim_subject: str = "sub"
     # Keycloak JWKS used to verify ``apm-principal-token``: an embedded JSON
     # document or a URL; empty fetches ``{issuer}/protocol/openid-connect/certs``.

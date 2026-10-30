@@ -109,8 +109,8 @@ class AuthAdapter(Protocol):
 class JwtAuthAdapter:
     """Verify ``apm-principal-token`` against Keycloak's JWKS.
 
-    Validates the signature (RS256), issuer, audience and ``exp`` exactly the
-    way ``onecx-permission-svc`` does, using the configured issuer and key set.
+    Validates the signature (RS256), issuer and ``exp`` the way
+    ``onecx-permission-svc`` does, using the configured issuer and key set.
     ``settings.jwks`` is either an embedded JWKS JSON document or a URL; when
     empty, the Keycloak ``certs`` endpoint of ``auth.issuer`` is fetched. The
     token's ``kid`` header selects which JWKS key verifies it, and an unknown
@@ -248,8 +248,10 @@ class JwtAuthAdapter:
                 token,
                 key=key,
                 algorithms=["RS256"],
-                audience=self._settings.audience,
                 issuer=self._settings.issuer,
+                # Even without an expected audience, PyJWT rejects any token that
+                # has an `aud` claim, so the audience check must be switched off.
+                options={"verify_aud": False},
             )
         except Exception as exc:  # noqa: BLE001 - all validation failures are auth failures
             raise AuthenticationError(f"token verification failed: {exc}") from exc
@@ -276,9 +278,8 @@ class JwtAuthAdapter:
                 token,
                 key=key,
                 algorithms=["RS256"],
-                audience=self._settings.audience,
                 issuer=self._settings.issuer,
-                options={"verify_exp": False},
+                options={"verify_exp": False, "verify_aud": False},
             )
             return int(claims.get("exp", 0)) <= time.time()
         except Exception:  # noqa: BLE001 - untrusted token is treated as lapsed

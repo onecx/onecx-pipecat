@@ -499,9 +499,8 @@ TLS or an auth proxy in front of the pod.
 | Yes, must equal the `iss` of the `apm-principal-token`. The chart renders an
 unresolved placeholder if neither is set.
 
-| `ONECX_AUTH__AUDIENCE`, `ONECX_AUTH__JWKS`, `ONECX_AUTH__TOKEN_ENDPOINT`
+| `ONECX_AUTH__JWKS`, `ONECX_AUTH__TOKEN_ENDPOINT`
 | `app.env`
-| `ONECX_AUTH__AUDIENCE: "onecx-pipecat"`
 | Only if the defaults do not fit; JWKS and token endpoint are derived from the
 issuer.
 

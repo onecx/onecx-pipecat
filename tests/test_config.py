@@ -5,7 +5,6 @@ def test_defaults_are_typed_and_usable():
     s = Settings()
     assert s.app_name == "onecx-pipecat"
     assert s.port == 8080
-    assert s.auth.audience == "onecx-pipecat"
     assert s.speech.sample_rate_hz == 16000
     assert s.permission.voice_resource == "VOICE"
     assert s.mcp.timeout_seconds == 30.0
