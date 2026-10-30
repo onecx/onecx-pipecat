@@ -43,7 +43,6 @@ app:
     ONECX_SPEECH__SAMPLE_RATE_HZ: "16000"
     # Environment-specific overrides (the app defaults already match the OneCX
     # in-cluster service names on port 8080):
-    # ONECX_AUTH__AUDIENCE: "onecx-pipecat"
     # ONECX_AUTH__JWKS: ""
     # ONECX_AGENT_CONFIG__BASE_URL: "http://onecx-ai-provider-svc:8080"
     # ONECX_CHAT__BASE_URL: "http://onecx-chat-svc:8080"

@@ -111,14 +111,13 @@ def _rsa_jwks():
     return key, jwks
 
 
-def _signed_token(key, *, issuer, audience, subject, exp):
+def _signed_token(key, *, issuer, subject, exp, audience="onecx-shell-ui"):
     import jwt
 
-    return jwt.encode(
-        {"sub": subject, "tenant_id": "acme", "iss": issuer, "aud": audience, "exp": exp},
-        key,
-        algorithm="RS256",
-    )
+    claims = {"sub": subject, "tenant_id": "acme", "iss": issuer, "exp": exp}
+    if audience is not None:
+        claims["aud"] = audience
+    return jwt.encode(claims, key, algorithm="RS256")
 
 
 async def test_jwt_auth_verifies_signature_issuer_and_expiry():
@@ -126,13 +125,12 @@ async def test_jwt_auth_verifies_signature_issuer_and_expiry():
     from onecx_pipecat.config import AuthSettings
 
     key, jwks = _rsa_jwks()
-    settings = AuthSettings(issuer="https://issuer.example", audience="onecx-pipecat")
+    settings = AuthSettings(issuer="https://issuer.example")
     auth = JwtAuthAdapter(settings)
     auth.set_jwks(jwks)
     token = _signed_token(
         key,
         issuer=settings.issuer,
-        audience=settings.audience,
         subject="user-1",
         exp=10_000_000_000,
     )
@@ -148,13 +146,12 @@ async def test_jwt_auth_rejects_bad_signature():
 
     key, jwks = _rsa_jwks()
     other, _ = _rsa_jwks()
-    settings = AuthSettings(issuer="https://issuer.example", audience="onecx-pipecat")
+    settings = AuthSettings(issuer="https://issuer.example")
     auth = JwtAuthAdapter(settings)
     auth.set_jwks(jwks)
     token = _signed_token(
         other,
         issuer=settings.issuer,
-        audience=settings.audience,
         subject="user-1",
         exp=10_000_000_000,
     )
@@ -162,32 +159,42 @@ async def test_jwt_auth_rejects_bad_signature():
         await auth.authenticate(token)
 
 
-async def test_jwt_auth_rejects_wrong_issuer_and_audience():
+async def test_jwt_auth_rejects_wrong_issuer():
     from onecx_pipecat.adapters.auth import JwtAuthAdapter
     from onecx_pipecat.config import AuthSettings
 
     key, jwks = _rsa_jwks()
-    settings = AuthSettings(issuer="https://issuer.example", audience="onecx-pipecat")
+    settings = AuthSettings(issuer="https://issuer.example")
     auth = JwtAuthAdapter(settings)
     auth.set_jwks(jwks)
     bad_issuer = _signed_token(
         key,
         issuer="https://evil.example",
-        audience="onecx-pipecat",
-        subject="u",
-        exp=10_000_000_000,
-    )
-    bad_aud = _signed_token(
-        key,
-        issuer="https://issuer.example",
-        audience="someone-else",
         subject="u",
         exp=10_000_000_000,
     )
     with pytest.raises(AuthenticationError):
         await auth.authenticate(bad_issuer)
-    with pytest.raises(AuthenticationError):
-        await auth.authenticate(bad_aud)
+
+
+@pytest.mark.parametrize("audience", ["onecx-shell-ui", "account", None])
+async def test_jwt_auth_does_not_check_the_audience(audience):
+    from onecx_pipecat.adapters.auth import JwtAuthAdapter
+    from onecx_pipecat.config import AuthSettings
+
+    key, jwks = _rsa_jwks()
+    settings = AuthSettings(issuer="https://issuer.example")
+    auth = JwtAuthAdapter(settings)
+    auth.set_jwks(jwks)
+    token = _signed_token(
+        key,
+        issuer=settings.issuer,
+        subject="u",
+        exp=10_000_000_000,
+        audience=audience,
+    )
+    assert (await auth.authenticate(token)).subject == "u"
+    assert auth.is_expired(token) is False
 
 
 async def test_jwt_auth_rejects_expired_token():
@@ -195,12 +202,10 @@ async def test_jwt_auth_rejects_expired_token():
     from onecx_pipecat.config import AuthSettings
 
     key, jwks = _rsa_jwks()
-    settings = AuthSettings(issuer="https://issuer.example", audience="onecx-pipecat")
+    settings = AuthSettings(issuer="https://issuer.example")
     auth = JwtAuthAdapter(settings)
     auth.set_jwks(jwks)
-    token = _signed_token(
-        key, issuer=settings.issuer, audience=settings.audience, subject="u", exp=1
-    )
+    token = _signed_token(key, issuer=settings.issuer, subject="u", exp=1)
     with pytest.raises(AuthenticationError):
         await auth.authenticate(token)
     assert auth.is_expired(token) is True
@@ -226,11 +231,11 @@ def _rsa_jwk(kid: str):
     return key, jwk
 
 
-def _signed_token_with_kid(key, *, kid, issuer, audience, subject, exp):
+def _signed_token_with_kid(key, *, kid, issuer, subject, exp):
     import jwt
 
     return jwt.encode(
-        {"sub": subject, "tenant_id": "acme", "iss": issuer, "aud": audience, "exp": exp},
+        {"sub": subject, "tenant_id": "acme", "iss": issuer, "aud": "onecx-shell-ui", "exp": exp},
         key,
         algorithm="RS256",
         headers={"kid": kid},
@@ -247,7 +252,7 @@ async def test_jwt_auth_matches_key_by_kid_across_rotation():
     first_key, first_jwk = _rsa_jwk("key-v1")
     second_key, second_jwk = _rsa_jwk("key-v2")
     jwks = {"keys": [first_jwk, second_jwk]}
-    settings = AuthSettings(issuer="https://issuer.example", audience="onecx-pipecat")
+    settings = AuthSettings(issuer="https://issuer.example")
     auth = JwtAuthAdapter(settings)
     auth.set_jwks(jwks)
 
@@ -255,7 +260,6 @@ async def test_jwt_auth_matches_key_by_kid_across_rotation():
         second_key,
         kid="key-v2",
         issuer=settings.issuer,
-        audience=settings.audience,
         subject="user-2",
         exp=10_000_000_000,
     )
@@ -267,7 +271,6 @@ async def test_jwt_auth_matches_key_by_kid_across_rotation():
         first_key,
         kid="key-v1",
         issuer=settings.issuer,
-        audience=settings.audience,
         subject="user-1",
         exp=10_000_000_000,
     )
@@ -279,7 +282,7 @@ async def test_jwt_auth_rejects_token_with_unknown_kid():
     from onecx_pipecat.config import AuthSettings
 
     key, jwk = _rsa_jwk("key-v1")
-    settings = AuthSettings(issuer="https://issuer.example", audience="onecx-pipecat")
+    settings = AuthSettings(issuer="https://issuer.example")
     auth = JwtAuthAdapter(settings)
     auth.set_jwks({"keys": [jwk]})
     # A token whose kid is not in the JWKS must be rejected rather than tried
@@ -288,7 +291,6 @@ async def test_jwt_auth_rejects_token_with_unknown_kid():
         key,
         kid="key-v9",
         issuer=settings.issuer,
-        audience=settings.audience,
         subject="u",
         exp=10_000_000_000,
     )
@@ -302,14 +304,13 @@ async def test_jwt_auth_falls_back_to_first_key_without_kid():
     from onecx_pipecat.config import AuthSettings
 
     key, jwks = _rsa_jwks()
-    settings = AuthSettings(issuer="https://issuer.example", audience="onecx-pipecat")
+    settings = AuthSettings(issuer="https://issuer.example")
     auth = JwtAuthAdapter(settings)
     auth.set_jwks(jwks)
     # _signed_token carries no kid; the single-key set still verifies it.
     token = _signed_token(
         key,
         issuer=settings.issuer,
-        audience=settings.audience,
         subject="user-1",
         exp=10_000_000_000,
     )
@@ -646,7 +647,7 @@ def _jwks_endpoint(seen: list, *jwks: dict):
 
 def _issuer_token(key, kid: str) -> str:
     return _signed_token_with_kid(
-        key, kid=kid, issuer=_AUTH.issuer, audience=_AUTH.audience, subject="u", exp=10_000_000_000
+        key, kid=kid, issuer=_AUTH.issuer, subject="u", exp=10_000_000_000
     )
 
 

@@ -70,7 +70,7 @@ session documentation for the full protocol.
 
 | Adapter | Implementation | Backing service and behaviour |
 |---|---|---|
-| **Authentication** | JWT verification | Verifies the user's `apm-principal-token` (signature, issuer, audience) against the Keycloak JWKS and yields a principal. Can read expiry without enforcing it. |
+| **Authentication** | JWT verification | Verifies the user's `apm-principal-token` (signature, issuer, expiry) against the Keycloak JWKS and yields a principal. Can read expiry without enforcing it. |
 | **Service authentication** | OIDC client credentials | Pipecat's own token for outbound OneCX calls, in the way a BFF does it. |
 | **Agent configuration** | HTTP | Fetches the agent configuration from the AI provider service. Missing, invalid, unreachable or voice-disabled agents fail the session start. |
 | **Chat** | HTTP | Loads a chat by id as the user and confirms the user is a member. |

@@ -36,8 +36,7 @@ embedded document or a URL; empty fetches the issuer's
 `/protocol/openid-connect/certs` on first use. `set_jwks(jwks)` pins an
 explicit set (an embedded `{"keys": [...]}` document, a bare list of JWKs, or
 a single JWK) that is never refetched. `authenticate` decodes the token with
-RS256, checking signature, `issuer`, and `audience`; `is_expired` decodes
-without re-verifying expiry and reports whether `exp` is in the past.
+RS256, checking signature, `issuer`, and expiry; `is_expired` decodes without re-verifying expiry and reports whether `exp` is in the past.
 
 The key used for a token is chosen by the token's `kid` header, so a JWKS that
 carries several keys (a rotated set) is used correctly: `authenticate` reads
