@@ -45,7 +45,7 @@ class HttpChatPersistence:
     with the user's id, ASSISTANT -> ``ASSISTANT`` message) with
     ``skipAIProcessing`` so chat-svc stores the message without forwarding it
     to the AI service. ``Message`` has no status field, so an INTERRUPTED
-    assistant entry is stored as the text that was actually spoken. Only
+    assistant entry is stored as caption text sent to the client, spoken or not. Only
     visible HUMAN/ASSISTANT entries are written; other kinds are rejected.
     Loads ``GET /internal/chats/{id}/messages`` (404 means no messages yet).
     Failures raise ``PersistenceError`` so callers fail closed.

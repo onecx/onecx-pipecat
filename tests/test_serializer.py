@@ -3,6 +3,7 @@ import json
 
 import pytest
 from pipecat.frames.frames import (
+    AggregatedTextFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     InputAudioRawFrame,
@@ -86,9 +87,19 @@ async def test_transcripts_map_to_partial_and_final(serializer):
     assert final == {"kind": "transcript", "text": "hello", "state": "FINAL"}
 
 
-async def test_spoken_text_maps_to_assistant_text(serializer):
-    event = await _event(serializer, TTSTextFrame("hi there", aggregated_by="word"))
+async def test_early_spoken_text_maps_to_assistant_text(serializer):
+    frame = AggregatedTextFrame("hi there", aggregated_by="sentence")
+    frame.will_be_spoken = True
+    event = await _event(serializer, frame)
     assert event == {"kind": "assistant_text", "text": "hi there"}
+
+
+async def test_unspoken_and_later_tts_text_do_not_duplicate_captions(serializer):
+    unspoken = AggregatedTextFrame("not spoken", aggregated_by="sentence")
+    later = TTSTextFrame("already sent", aggregated_by="sentence")
+    later.will_be_spoken = True
+    assert await _event(serializer, unspoken) is None
+    assert await _event(serializer, later) is None
 
 
 async def test_output_audio_maps_to_base64_assistant_audio(serializer):

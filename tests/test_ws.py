@@ -150,6 +150,8 @@ def test_ws_refresh_with_a_bad_token_is_a_typed_error():
         ws.receive_json()
         ws.send_json({"type": "refresh_token", "apm_principal_token": "bogus"})
         assert _until(ws, "error")[-1]["code"] == "authentication_failed"
+        ws.send_json({"type": "stop"})
+        _until(ws, "session_closed")
 
 
 def test_ws_idle_session_is_ended_at_token_expiry():

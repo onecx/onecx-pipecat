@@ -1,7 +1,13 @@
 """Assembles the long-lived Pipecat pipeline of one voice session.
 
-``transport.input() -> control -> stt -> transcripts -> user aggregator -> llm
--> tts -> wire events -> transport.output() -> assistant aggregator``
+``transport.input() -> control -> stt -> transcripts -> user aggregator
+-> context sync -> llm -> context sync -> tts -> wire events -> captions shown
+-> transport.output() -> captions settled -> assistant aggregator``
+
+Captions (``assistant_text``) are sent when a sentence is ready for synthesis,
+ahead of its audio, which the output transport paces in real time. The caption
+ledger remembers what was emitted so an interrupted reply is persisted as the
+sentences sent to the client, not only the ones that were played.
 
 Turn boundaries come either from a VAD analyzer in the user aggregator
 (``speech.turn_detection=vad``: the user turn starts on speech and ends after a
@@ -20,12 +26,12 @@ from fastapi import WebSocket
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.vad_analyzer import VADAnalyzer
 from pipecat.frames.frames import (
+    AggregatedTextFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     InterimTranscriptionFrame,
     OutputTransportMessageUrgentFrame,
     TranscriptionFrame,
-    TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
@@ -46,6 +52,7 @@ from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserT
 
 from onecx_pipecat.config import Settings
 from onecx_pipecat.models import VoiceEntry
+from onecx_pipecat.pipeline.captions import CaptionLedger
 from onecx_pipecat.pipeline.persistence import attach_persistence
 from onecx_pipecat.pipeline.processors import SessionControl, WireEvents
 from onecx_pipecat.pipeline.serializer import OnecxFrameSerializer
@@ -96,7 +103,10 @@ def build_voice_pipeline(
     )
     aggregators = LLMContextAggregatorPair(context, user_params=_user_params(vad_analyzer))
     user, assistant = aggregators.user(), aggregators.assistant()
-    attach_persistence(user, assistant, save_entry, emit)
+    captions = CaptionLedger()
+    context_in, context_out = attach_persistence(
+        user, assistant, save_entry, emit, captions=captions, context=context
+    )
 
     pipeline = Pipeline(
         [
@@ -105,7 +115,9 @@ def build_voice_pipeline(
             stt,
             WireEvents(urgent=(InterimTranscriptionFrame, TranscriptionFrame)),
             user,
+            context_in,
             llm,
+            context_out,
             tts,
             WireEvents(
                 urgent=(
@@ -113,10 +125,12 @@ def build_voice_pipeline(
                     BotStoppedSpeakingFrame,
                     UserStartedSpeakingFrame,
                     UserStoppedSpeakingFrame,
+                    AggregatedTextFrame,
                 ),
-                ordered=(TTSTextFrame,),
             ),
+            captions.shown,
             transport.output(),
+            captions.settled,
             assistant,
         ]
     )

@@ -19,6 +19,7 @@ import json
 from typing import Any
 
 from pipecat.frames.frames import (
+    AggregatedTextFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     Frame,
@@ -53,14 +54,26 @@ from onecx_pipecat.protocol import (
 BAD_COMMAND = {"type": "bad_command"}
 
 
+def caption_text(frame: Frame) -> str | None:
+    """Return a sentence announced for speech, excluding the later TTS text."""
+    if (
+        isinstance(frame, AggregatedTextFrame)
+        and not isinstance(frame, TTSTextFrame)
+        and frame.will_be_spoken
+        and frame.text.strip()
+    ):
+        return frame.text
+    return None
+
+
 def wire_event(frame: Frame) -> Event | None:
     """The client event a frame maps to, or None when it is not client-visible."""
     if isinstance(frame, InterimTranscriptionFrame):
         return Transcript(text=frame.text, state="PARTIAL")
     if isinstance(frame, TranscriptionFrame):
         return Transcript(text=frame.text, state="FINAL")
-    if isinstance(frame, TTSTextFrame):
-        return AssistantText(text=frame.text)
+    if (text := caption_text(frame)) is not None:
+        return AssistantText(text=text)
     if isinstance(frame, OutputAudioRawFrame):
         return AssistantAudio(
             audio=base64.b64encode(frame.audio).decode("ascii"),

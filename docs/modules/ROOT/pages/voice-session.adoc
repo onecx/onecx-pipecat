@@ -48,7 +48,8 @@ accepted.
 [source]
 ----
 transport.input() -> session control -> STT -> transcript events -> user aggregator
-  -> LLM -> TTS -> wire events -> transport.output() -> assistant aggregator
+  -> context sync -> LLM -> context sync -> TTS -> wire events -> caption ledger
+  -> transport.output() -> caption ledger -> assistant aggregator
 ----
 
 * `transport.input()` / `transport.output()` are Pipecat's
@@ -68,6 +69,8 @@ arrived (`SpeechTimeoutUserTurnStopStrategy`). The client only streams audio.
 allowed MCP tools plus `activate_skill` when the agent has usable skills.
 MCP tool calls go through `VoiceSession.invoke_tool`, which keeps the
 `ALWAYS_ALLOW` check, the no-redirect rule and the user-token propagation.
+Context synchronization reconciles interrupted replies before the next LLM
+inference without waiting for an entire reply or blocking tool-control frames.
 * The pipeline idle timeout is `ONECX_PIPELINE__IDLE_TIMEOUT_SECS` (default:
 disabled; the session ends at token expiry).
 
@@ -111,7 +114,7 @@ Anything else (invalid JSON, unknown `type`, invalid base64) is answered with
 | `degraded_capability` | An MCP server was unreachable at discovery; its tools are missing.
 | `transcript` | `text` and `state` (`PARTIAL` interim, `FINAL`). Only the final text becomes a durable entry.
 | `user_started_speaking` / `user_stopped_speaking` | A user turn started (while the assistant speaks: a barge-in) or ended. Sent in both turn-detection modes.
-| `assistant_text` | A streamed chunk of the text being spoken (`text`), in step with the audio.
+| `assistant_text` | One sentence of the reply (`text`), sent when it is ready for synthesis, ahead of its audio.
 | `assistant_audio` | Base64 PCM16 `audio` with `sample_rate`, `num_channels`.
 | `bot_started_speaking` / `bot_stopped_speaking` | Playback state of the assistant.
 | `interrupted` | The user barged in; drop queued assistant audio.
@@ -130,9 +133,9 @@ Example turn with server VAD:
 {"kind": "user_started_speaking"}
 {"kind": "transcript", "text": "what is the weather", "state": "FINAL"}
 {"kind": "user_stopped_speaking"}
+{"kind": "assistant_text", "text": "It is sunny."}
 {"kind": "bot_started_speaking"}
 {"kind": "assistant_audio", "audio": "AAAA...", "sample_rate": 16000, "num_channels": 1}
-{"kind": "assistant_text", "text": "It is sunny."}
 {"kind": "bot_stopped_speaking"}
 {"kind": "turn_complete", "entry_id": "abc:2"}
 ----
@@ -145,20 +148,29 @@ With client turn detection the audio is wrapped in `user_started_speaking` and
 * *Turn:* speech followed by a pause (VAD) or `user_started_speaking`, audio,
 `user_stopped_speaking` (client). The user aggregator adds the final transcript to the
 LLM context and triggers the LLM; the reply is spoken sentence by sentence.
+Each sentence's `assistant_text` is sent when it is ready for synthesis, before
+the corresponding audio is sent over a healthy WebSocket connection. The output
+transport still streams audio in real time. There is no browser-render
+acknowledgement, so this does not guarantee when the client paints the text.
 * *Barge-in:* a user turn that starts while the assistant speaks (detected
 speech, or `user_started_speaking`) makes the user
 aggregator broadcast an `InterruptionFrame`. Pending LLM and TTS output is
 cancelled, the output transport drops queued audio, the client receives
 `interrupted`, and the assistant aggregator closes the turn as interrupted.
+Sentences already sent as `assistant_text` but not yet played stay part of the
+reply.
 * *Persistence* is driven by the aggregators' turn events and writes to the
 anchored chat (onecx-chat-svc, with the user's current token; the in-memory
 backend is for tests). The user turn ends
 with one `HUMAN` entry (empty or noise-only input stays ephemeral). The
 assistant turn ends with one `ASSISTANT` entry with status `COMPLETED` or
-`INTERRUPTED`, containing the text that was actually spoken. `turn_complete` is
-sent only after the assistant entry is stored. If nothing had been spoken yet
-when the user interrupted, no assistant entry is written. chat-svc's `Message`
-has no status field, so an `INTERRUPTED` entry is stored as its spoken text.
+`INTERRUPTED`. A `COMPLETED` entry holds Pipecat's aggregated reply; an `INTERRUPTED`
+entry holds every sentence already queued as `assistant_text`, spoken or not,
+and the LLM context keeps the same text before the next inference.
+`turn_complete` is sent only after the assistant entry is stored. If no sentence had
+been sent yet when the user interrupted, no assistant entry is written.
+chat-svc's `Message` has no status field, so an `INTERRUPTED` entry is stored as
+the text sent to the client.
 * *Persistence failure:* `error{persistence_failed}` and no `turn_complete`; no
 history is fabricated. Pipecat starts the LLM before the user-turn event
 fires, so after a failed `HUMAN` write the reply of that turn is spoken but
@@ -183,6 +195,8 @@ and close code 1008. Checked periodically, also while idle.
 * `stt_failed`, `llm_failed`, `tts_failed` — non-fatal service failures; the
 session stays usable for the next turn.
 * `persistence_failed` — see above.
+* `context_sync_failed` — interrupted text could not be reconciled with the
+LLM context; further inference is blocked to avoid using inconsistent history.
 
 == Closing
 
