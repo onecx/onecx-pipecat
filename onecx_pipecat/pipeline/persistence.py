@@ -2,12 +2,12 @@
 
 A user turn is persisted as a HUMAN entry when it ends with non-blank text; an
 assistant turn as an ASSISTANT entry, COMPLETED or INTERRUPTED. Captions reach
-the client ahead of the audio, so an INTERRUPTED entry holds the sentences that
-were emitted, not only the ones that were spoken, and the LLM context is updated
-to match. Pipecat starts the LLM before ``on_user_turn_stopped`` fires, so a
-HUMAN persistence failure cannot prevent the reply: the error is reported and
-the reply of that turn is neither persisted nor acknowledged with
-``turn_complete``.
+the client after synthesis and independently of playback, so an INTERRUPTED
+entry holds delivered captions, not only sentences that were played, and the
+LLM context is updated to match. Pipecat starts the LLM before
+``on_user_turn_stopped`` fires, so a HUMAN persistence failure cannot prevent
+the reply: the error is reported and the reply of that turn is neither
+persisted nor acknowledged with ``turn_complete``.
 """
 
 from __future__ import annotations
@@ -69,19 +69,38 @@ class _ContextSync(FrameProcessor):
 
     def track_save(self, task: asyncio.Task, turn: _UserTurn | None) -> None:
         self._saves[task] = turn
-        task.add_done_callback(lambda completed: self._saves.pop(completed, None))
+
+        def finish(completed: asyncio.Task) -> None:
+            self._saves.pop(completed, None)
+            if completed.cancelled():
+                logger.debug("Owned assistant persistence task was cancelled")
+            elif failure := completed.exception():
+                logger.error(
+                    "Owned assistant persistence task failed",
+                    exc_info=(type(failure), failure, failure.__traceback__),
+                )
+
+        task.add_done_callback(finish)
 
     def track_completion(self, completion: asyncio.Event, turn: _UserTurn | None) -> None:
         self._completions[completion] = turn
 
     async def wait_for_saves(self) -> None:
-        if self._saves:
-            await asyncio.gather(*self._saves)
+        while self._saves or any(not completion.is_set() for completion in self._completions):
+            tasks = list(self._saves)
+            completions = [
+                completion for completion in self._completions if not completion.is_set()
+            ]
+            if tasks:
+                await asyncio.gather(*(asyncio.shield(task) for task in tasks))
+            if completions:
+                await asyncio.gather(*(completion.wait() for completion in completions))
+        self._completions.clear()
 
     async def wait_for_prior_saves(self, turn: _UserTurn) -> None:
         prior = [task for task, saved_turn in self._saves.items() if saved_turn is not turn]
         if prior:
-            await asyncio.gather(*prior)
+            await asyncio.gather(*(asyncio.shield(task) for task in prior))
         prior_completions = [
             completion
             for completion, saved_turn in self._completions.items()
@@ -123,12 +142,15 @@ class _UserTurn:
 
 
 class _AssistantReply:
-    def __init__(self, turn: _UserTurn | None, anchor: object | None) -> None:
+    def __init__(
+        self, turn: _UserTurn | None, anchor: object | None, context_messages: list[dict]
+    ) -> None:
         self.turn = turn
         self.anchor = anchor
+        self.prior_message_ids = frozenset(id(message) for message in context_messages)
         self.claimed = False
         self.finished = False
-        self.completion: asyncio.Event | None = None
+        self.completion = asyncio.Event()
         self.finishing_caption = ""
         self.finishing_spoken = ""
 
@@ -141,6 +163,7 @@ def attach_persistence(
     *,
     captions: CaptionLedger,
     context: LLMContext,
+    fatal_context_failure: Callable[[Exception], Awaitable[None]],
 ) -> tuple[FrameProcessor, FrameProcessor]:
     current: _UserTurn | None = None
     active_reply: _AssistantReply | None = None
@@ -158,14 +181,18 @@ def attach_persistence(
             ),
             None,
         )
-        active_reply = _AssistantReply(current, anchor)
+        active_reply = _AssistantReply(current, anchor, inference_context.get_messages())
+        downstream_sync.track_completion(active_reply.completion, active_reply.turn)
 
     def capture_followup(inference_context: LLMContext) -> None:
         nonlocal active_reply
         if active_reply is None:
             capture_inference(inference_context)
         else:
-            active_reply = _AssistantReply(active_reply.turn, active_reply.anchor)
+            active_reply = _AssistantReply(
+                active_reply.turn, active_reply.anchor, inference_context.get_messages()
+            )
+            downstream_sync.track_completion(active_reply.completion, active_reply.turn)
 
     downstream_sync = _ContextSync(
         captions, direction=FrameDirection.DOWNSTREAM, capture=capture_inference
@@ -213,7 +240,8 @@ def attach_persistence(
     async def on_assistant_turn_started(_aggregator) -> None:
         nonlocal active_reply
         if active_reply is None:
-            active_reply = _AssistantReply(current, None)
+            active_reply = _AssistantReply(current, None, context.get_messages())
+            downstream_sync.track_completion(active_reply.completion, active_reply.turn)
 
     async def save_assistant(turn: _UserTurn | None, text: str, status: VoiceEntryStatus) -> None:
         if turn is not None:
@@ -233,8 +261,7 @@ def attach_persistence(
         try:
             await save_assistant(reply.turn, text, status)
         finally:
-            if reply.completion is not None:
-                reply.completion.set()
+            reply.completion.set()
 
     @assistant.event_handler("on_before_process_frame")
     async def before_assistant_frame(aggregator, frame: Frame) -> None:
@@ -254,13 +281,7 @@ def attach_persistence(
                 finishing[frame.id] = active_reply
                 active_reply.finishing_caption = caption
                 active_reply.finishing_spoken = aggregator.aggregation_string()
-                if caption or active_reply.finishing_spoken:
-                    active_reply.completion = asyncio.Event()
-                    downstream_sync.track_completion(active_reply.completion, active_reply.turn)
         if isinstance(frame, InterruptionFrame | CancelFrame):
-            if active_reply is not None and active_reply.completion is None:
-                active_reply.completion = asyncio.Event()
-                downstream_sync.track_completion(active_reply.completion, active_reply.turn)
             interruptions[frame.id] = (aggregator.aggregation_string(), active_reply)
 
     @assistant.event_handler("on_after_process_frame")
@@ -269,37 +290,46 @@ def attach_persistence(
             reply.finished = True
         if not isinstance(frame, InterruptionFrame | CancelFrame):
             return
+        reply: _AssistantReply | None = None
+        shown = ""
         try:
             spoken, reply = interruptions.pop(frame.id)
             shown = captions.take_interrupted(frame.id)
             if reply is None:
-                reply = _AssistantReply(current, None)
+                captions.finish_reconciliation(frame.id)
+                return
             for frame_id, completing in list(finishing.items()):
                 if completing is reply:
                     del finishing[frame_id]
             if not reply.claimed and not reply.finished:
                 reply.claimed = True
                 shown = shown or reply.finishing_caption
-                if not spoken and reply.finishing_spoken:
-                    spoken = reply.finishing_spoken
-                if shown:
-                    _replace_reply(context, spoken=spoken, shown=shown, anchor=reply.anchor)
-                text = shown or spoken.strip()
+                spoken = spoken or reply.finishing_spoken
+                if shown or spoken.strip():
+                    _replace_reply(
+                        context,
+                        spoken=spoken,
+                        shown=shown,
+                        anchor=reply.anchor,
+                        prior_message_ids=reply.prior_message_ids,
+                    )
+                text = shown
                 if text:
                     downstream_sync.save_interrupted(
                         persist_reply(reply, text, VoiceEntryStatus.INTERRUPTED), reply.turn
                     )
-                elif reply.completion is not None:
+                else:
                     reply.completion.set()
-        except Exception:  # noqa: BLE001 - prevent inference with unreconciled context
-            captions.finish_reconciliation(frame.id, failed=True)
+        except Exception as exc:  # noqa: BLE001 - the session must not infer from stale context
             logger.exception("Could not reconcile interrupted assistant context")
-            await emit(
-                ErrorEvent(
-                    code="context_sync_failed",
-                    message="Interrupted assistant context could not be reconciled",
+            if reply is not None and shown and not reply.completion.is_set():
+                downstream_sync.save_interrupted(
+                    persist_reply(reply, shown, VoiceEntryStatus.INTERRUPTED), reply.turn
                 )
-            )
+            elif reply is not None:
+                reply.completion.set()
+            await fatal_context_failure(exc)
+            captions.finish_reconciliation(frame.id)
         else:
             captions.finish_reconciliation(frame.id)
 
@@ -307,7 +337,11 @@ def attach_persistence(
     async def on_assistant_turn_stopped(_aggregator, message) -> None:
         if message.interrupted:
             return
-        reply = event_reply.get() or active_reply or _AssistantReply(current, None)
+        reply = (
+            event_reply.get()
+            or active_reply
+            or _AssistantReply(current, None, context.get_messages())
+        )
         if reply.claimed:
             return
         reply.claimed = True
@@ -318,7 +352,14 @@ def attach_persistence(
     return downstream_sync, upstream_sync
 
 
-def _replace_reply(context: LLMContext, *, spoken: str, shown: str, anchor: object | None) -> None:
+def _replace_reply(
+    context: LLMContext,
+    *,
+    spoken: str,
+    shown: str,
+    anchor: object | None,
+    prior_message_ids: frozenset[int] | None = None,
+) -> None:
     """Place the emitted text in its user turn without changing tool or later messages."""
     messages = list(context.get_messages())
     start = 0
@@ -335,20 +376,35 @@ def _replace_reply(context: LLMContext, *, spoken: str, shown: str, anchor: obje
         len(messages),
     )
     if spoken:
-        for index in range(len(messages) - 1, start - 1, -1):
+        matching = (
+            index
+            for index in range(boundary - 1, start - 1, -1)
+            if isinstance(messages[index], dict)
+            and messages[index].get("role") == "assistant"
+            and messages[index].get("content") == spoken
+            and (prior_message_ids is None or id(messages[index]) not in prior_message_ids)
+        )
+        index = next(matching, None)
+        if index is None and prior_message_ids is not None:
+            index = next(
+                (
+                    candidate
+                    for candidate in range(len(messages) - 1, boundary - 1, -1)
+                    if isinstance(messages[candidate], dict)
+                    and messages[candidate].get("role") == "assistant"
+                    and messages[candidate].get("content") == spoken
+                    and id(messages[candidate]) not in prior_message_ids
+                ),
+                None,
+            )
+        if index is not None:
             message = messages[index]
-            if (
-                isinstance(message, dict)
-                and message.get("role") == "assistant"
-                and message.get("content") == spoken
-            ):
-                replacement = {**message, "content": shown}
-                if index < boundary:
-                    messages[index] = replacement
-                else:
-                    messages.pop(index)
-                    messages.insert(boundary, replacement)
-                break
+            replacement = {**message, "content": shown}
+            if index < boundary:
+                messages[index] = replacement
+            else:
+                messages.pop(index)
+                messages.insert(boundary, replacement)
         else:
             raise RuntimeError("The interrupted assistant text is not in the context")
     else:

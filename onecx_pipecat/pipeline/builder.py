@@ -4,10 +4,10 @@
 -> context sync -> llm -> context sync -> tts -> wire events -> captions shown
 -> transport.output() -> captions settled -> assistant aggregator``
 
-Captions (``assistant_text``) are sent when a sentence is ready for synthesis,
-ahead of its audio, which the output transport paces in real time. The caption
-ledger remembers what was emitted so an interrupted reply is persisted as the
-sentences sent to the client, not only the ones that were played.
+Captions (``assistant_text``) are sent after sentence synthesis completes and
+urgently, independently of audio playback, which the output transport paces in
+real time. The caption ledger remembers what was emitted so an interrupted
+reply is persisted as the sentences sent to the client, not only the ones played.
 
 Turn boundaries come either from a VAD analyzer in the user aggregator
 (``speech.turn_detection=vad``: the user turn starts on speech and ends after a
@@ -26,12 +26,12 @@ from fastapi import WebSocket
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.vad_analyzer import VADAnalyzer
 from pipecat.frames.frames import (
-    AggregatedTextFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     InterimTranscriptionFrame,
     OutputTransportMessageUrgentFrame,
     TranscriptionFrame,
+    TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
@@ -52,7 +52,7 @@ from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserT
 
 from onecx_pipecat.config import Settings
 from onecx_pipecat.models import VoiceEntry
-from onecx_pipecat.pipeline.captions import CaptionLedger
+from onecx_pipecat.pipeline.captions import CaptionLedger, CaptionWebsocketOutputTransport
 from onecx_pipecat.pipeline.persistence import attach_persistence
 from onecx_pipecat.pipeline.processors import SessionControl, WireEvents
 from onecx_pipecat.pipeline.serializer import OnecxFrameSerializer
@@ -78,6 +78,7 @@ def build_voice_pipeline(
     history: list[dict[str, str]],
     save_entry: Callable[[VoiceEntry], Awaitable[str]],
     dispatch: Callable[[Command], Awaitable[list[Event]]],
+    fatal_context_failure: Callable[[Exception], Awaitable[None]],
     vad_analyzer: VADAnalyzer | None = None,
 ) -> PipelineWorker:
     sample_rate = settings.speech.sample_rate_hz
@@ -104,8 +105,21 @@ def build_voice_pipeline(
     aggregators = LLMContextAggregatorPair(context, user_params=_user_params(vad_analyzer))
     user, assistant = aggregators.user(), aggregators.assistant()
     captions = CaptionLedger()
+    transport._output = CaptionWebsocketOutputTransport(
+        transport,
+        transport._client,
+        transport._params,
+        ledger=captions,
+        name=transport._output_name,
+    )
     context_in, context_out = attach_persistence(
-        user, assistant, save_entry, emit, captions=captions, context=context
+        user,
+        assistant,
+        save_entry,
+        emit,
+        captions=captions,
+        context=context,
+        fatal_context_failure=fatal_context_failure,
     )
 
     pipeline = Pipeline(
@@ -125,7 +139,7 @@ def build_voice_pipeline(
                     BotStoppedSpeakingFrame,
                     UserStartedSpeakingFrame,
                     UserStoppedSpeakingFrame,
-                    AggregatedTextFrame,
+                    TTSTextFrame,
                 ),
             ),
             captions.shown,

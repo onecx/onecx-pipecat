@@ -103,8 +103,9 @@ user's propagated `apm-principal-token`; failures raise `PersistenceError`.
 (so chat-svc stores the message without forwarding it to the AI service):
 `HUMAN` becomes `{type: HUMAN, userId, text}`, `ASSISTANT` becomes
 `{type: ASSISTANT, text}`. The `Message` schema has no status, so an
-`INTERRUPTED` assistant entry is stored as the caption text sent to the client,
-spoken or not.
+`INTERRUPTED` assistant entry is stored as the delivered `assistant_text`
+segments, spoken or not, including the text-only fallback for a handled TTS
+failure.
 Other entry kinds are rejected. The id comes from the response body or the
 `Location` header.
 * `history` sends `GET /internal/chats/{id}/messages` (404 means no messages

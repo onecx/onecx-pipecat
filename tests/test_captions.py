@@ -1,15 +1,17 @@
 from pipecat.frames.frames import (
-    AggregatedTextFrame,
     Frame,
     InterruptionFrame,
     LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
     OutputTransportMessageUrgentFrame,
+    TTSTextFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.tests.utils import SleepFrame, run_test
 
 from onecx_pipecat.pipeline.captions import CaptionLedger
+from onecx_pipecat.pipeline.processors import WireEvents
 from onecx_pipecat.protocol import AssistantText
 
 
@@ -17,13 +19,22 @@ def _shown(text: str) -> OutputTransportMessageUrgentFrame:
     return OutputTransportMessageUrgentFrame(message=AssistantText(text=text).model_dump())
 
 
-def _reached_transport(text: str) -> AggregatedTextFrame:
-    frame = AggregatedTextFrame(text, aggregated_by="sentence")
+def _reached_transport(text: str) -> TTSTextFrame:
+    frame = TTSTextFrame(text, aggregated_by="sentence")
     frame.will_be_spoken = True
     return frame
 
 
 async def _run(ledger: CaptionLedger, *frames) -> None:
+    class Delivered(FrameProcessor):
+        async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+            await super().process_frame(frame, direction)
+            if isinstance(frame, OutputTransportMessageUrgentFrame):
+                message = frame.message
+                if isinstance(message, dict) and message.get("kind") == "assistant_text":
+                    ledger.record(message.get("text", ""))
+            await self.push_frame(frame, direction)
+
     class Assistant(FrameProcessor):
         async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
             await super().process_frame(frame, direction)
@@ -37,7 +48,9 @@ async def _run(ledger: CaptionLedger, *frames) -> None:
 
     # Pauses let the data frames settle before the next system frame overtakes them.
     paced = [f for frame in frames for f in (frame, SleepFrame(sleep=0.02))]
-    await run_test(Pipeline([ledger.shown, ledger.settled, assistant]), frames_to_send=paced)
+    await run_test(
+        Pipeline([ledger.shown, Delivered(), ledger.settled, assistant]), frames_to_send=paced
+    )
 
 
 async def test_interruption_keeps_every_shown_caption_of_the_playing_reply():
@@ -86,3 +99,36 @@ def test_interrupted_snapshots_are_matched_to_their_interruption():
     ledger.interrupt(2)
     assert ledger.take_interrupted(2) == "Second reply."
     assert ledger.take_interrupted(1) == "First reply."
+
+
+async def test_stale_synthesis_text_is_not_emitted_after_interruption():
+    class Collect(FrameProcessor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.messages = []
+
+        async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+            await super().process_frame(frame, direction)
+            if isinstance(frame, OutputTransportMessageUrgentFrame):
+                self.messages.append(frame.message)
+            await self.push_frame(frame, direction)
+
+    def tts_text(text: str) -> TTSTextFrame:
+        frame = TTSTextFrame(text, aggregated_by="sentence")
+        frame.will_be_spoken = True
+        return frame
+
+    collect = Collect()
+    frames = [
+        LLMFullResponseStartFrame(),
+        InterruptionFrame(),
+        tts_text("cancelled"),
+        LLMFullResponseStartFrame(),
+        tts_text("active"),
+        LLMFullResponseEndFrame(),
+        tts_text("after response"),
+    ]
+    paced = [frame for item in frames for frame in (item, SleepFrame(sleep=0.01))]
+    await run_test(Pipeline([WireEvents(urgent=(TTSTextFrame,)), collect]), frames_to_send=paced)
+
+    assert [message["text"] for message in collect.messages] == ["active"]

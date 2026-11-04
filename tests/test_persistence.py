@@ -40,8 +40,17 @@ class _Harness:
         async def save(entry) -> str:
             return await store.append("s1", entry)
 
+        async def fatal_context_failure(failure: Exception) -> None:
+            raise failure
+
         self.context_sync, _ = attach_persistence(
-            self.user, self.assistant, save, emit, captions=self.captions, context=self.context
+            self.user,
+            self.assistant,
+            save,
+            emit,
+            captions=self.captions,
+            context=self.context,
+            fatal_context_failure=fatal_context_failure,
         )
 
     async def user_said(self, content) -> None:
@@ -84,8 +93,12 @@ async def test_completed_turn_persists_human_then_assistant_and_acknowledges():
 async def test_interrupted_assistant_turn_is_persisted_as_interrupted():
     h = _Harness(FakePersistence())
     await h.user_said("hello")
+    h.captions.record("partial")
     await h.assistant_said("partial", interrupted=True)
-    assert h.store.entries[-1].status is VoiceEntryStatus.INTERRUPTED
+    assert (h.store.entries[-1].text, h.store.entries[-1].status) == (
+        "partial",
+        VoiceEntryStatus.INTERRUPTED,
+    )
     assert [e.kind for e in h.emitted] == ["turn_complete"]
 
 
@@ -127,6 +140,27 @@ async def test_interrupted_context_update_preserves_later_user_and_tool_messages
     ]
 
 
+async def test_interrupted_context_does_not_replace_matching_text_in_a_later_turn():
+    context = LLMContext(
+        messages=[
+            {"role": "system", "content": "prompt"},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "same text"},
+            {"role": "user", "content": "second"},
+            {"role": "assistant", "content": "same text"},
+        ]
+    )
+    anchor = context.get_messages()[1]
+
+    _replace_reply(context, spoken="same text", shown="first caption", anchor=anchor)
+
+    assert context.get_messages()[2:] == [
+        {"role": "assistant", "content": "first caption"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "same text"},
+    ]
+
+
 @pytest.mark.parametrize("spoken", ["", "Heard sentence."])
 async def test_interrupted_context_is_inserted_before_the_next_user_after_tools(spoken):
     context = LLMContext(messages=[{"role": "system", "content": "prompt"}])
@@ -135,10 +169,17 @@ async def test_interrupted_context_is_inserted_before_the_next_user_after_tools(
     tool_result = {"role": "tool", "tool_call_id": "call-1", "content": "done"}
     next_user = {"role": "user", "content": "Next question"}
     context.add_messages([anchor, tool_call, tool_result, next_user])
+    prior_message_ids = frozenset(id(message) for message in context.get_messages())
     if spoken:
         context.add_message({"role": "assistant", "content": spoken})
 
-    _replace_reply(context, spoken=spoken, shown="The full caption.", anchor=anchor)
+    _replace_reply(
+        context,
+        spoken=spoken,
+        shown="The full caption.",
+        anchor=anchor,
+        prior_message_ids=prior_message_ids,
+    )
 
     assert context.get_messages()[1:] == [
         anchor,

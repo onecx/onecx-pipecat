@@ -19,7 +19,6 @@ import json
 from typing import Any
 
 from pipecat.frames.frames import (
-    AggregatedTextFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     Frame,
@@ -55,13 +54,8 @@ BAD_COMMAND = {"type": "bad_command"}
 
 
 def caption_text(frame: Frame) -> str | None:
-    """Return a sentence announced for speech, excluding the later TTS text."""
-    if (
-        isinstance(frame, AggregatedTextFrame)
-        and not isinstance(frame, TTSTextFrame)
-        and frame.will_be_spoken
-        and frame.text.strip()
-    ):
+    """Return a sentence whose synthesis attempt has completed."""
+    if isinstance(frame, TTSTextFrame) and frame.will_be_spoken and frame.text.strip():
         return frame.text
     return None
 

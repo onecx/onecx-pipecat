@@ -14,6 +14,7 @@ exposed to the LLM.
 
 from __future__ import annotations
 
+import asyncio
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -97,6 +98,7 @@ class VoiceSession:
         self._history: list[dict[str, str]] = []
         self._worker: PipelineWorker | None = None
         self._ended = False
+        self._fatal_task: asyncio.Task[None] | None = None
         self._final_events: list[Event] = []
         self._close_code = _NORMAL_CLOSURE
 
@@ -196,11 +198,15 @@ class VoiceSession:
                 history=self._history,
                 save_entry=self._save_entry,
                 dispatch=self.dispatch,
+                fatal_context_failure=self._fatal_context_failure,
                 vad_analyzer=build_vad_analyzer(self._container.settings),
             )
             try:
                 await run_worker(self._worker)
             finally:
+                if self._fatal_task is not None:
+                    await self._fatal_task
+                    self._fatal_task = None
                 self._worker = None
         self.state = SessionState.CLOSED
         try:
@@ -228,6 +234,18 @@ class VoiceSession:
         self._ended = True
         if self._worker is not None:
             await self._worker.cancel(reason="session_ended")
+
+    async def _fatal_context_failure(self, _failure: Exception) -> None:
+        """Close rather than continue when interrupted context cannot be reconciled."""
+        if self._fatal_task is not None:
+            return
+        events: list[Event] = [
+            ErrorEvent(code="llm_failed", message="language model context could not be reconciled"),
+            SessionClosed(reason="context_inconsistent"),
+        ]
+        self.state = SessionState.CLOSED
+        self._ended = True
+        self._fatal_task = asyncio.create_task(self.end_pipeline(events, _NORMAL_CLOSURE))
 
     async def release(self) -> None:
         """Cancel the pipeline if it is still running; idempotent."""

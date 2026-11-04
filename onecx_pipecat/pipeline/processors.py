@@ -5,10 +5,15 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from pipecat.frames.frames import (
+    CancelFrame,
     CancelWorkerFrame,
     Frame,
     InputTransportMessageFrame,
+    InterruptionFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
     OutputTransportMessageUrgentFrame,
+    TTSTextFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
@@ -66,9 +71,23 @@ class WireEvents(FrameProcessor):
     def __init__(self, *, urgent: tuple[type[Frame], ...], **kwargs) -> None:
         super().__init__(name="WireEvents", **kwargs)
         self._urgent = urgent
+        self._response_active = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
-        if isinstance(frame, self._urgent) and (event := wire_event(frame)) is not None:
+        if direction is FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseStartFrame):
+            self._response_active = True
+        elif direction is FrameDirection.DOWNSTREAM and isinstance(
+            frame, InterruptionFrame | CancelFrame | CancelWorkerFrame
+        ):
+            self._response_active = False
+        eligible = not isinstance(frame, TTSTextFrame) or self._response_active
+        if (
+            eligible
+            and isinstance(frame, self._urgent)
+            and (event := wire_event(frame)) is not None
+        ):
             await self.push_frame(OutputTransportMessageUrgentFrame(message=event.model_dump()))
         await self.push_frame(frame, direction)
+        if direction is FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseEndFrame):
+            self._response_active = False

@@ -1,13 +1,13 @@
-"""Tracks assistant captions emitted before their audio has finished.
+"""Tracks assistant captions emitted after synthesis but before audio finishes.
 
-Captions (``assistant_text``) are sent before synthesis, while the assistant
+Captions (``assistant_text``) are sent after synthesis, while the assistant
 aggregator after the output transport only collects the sentences that were
 actually played. ``CaptionLedger`` keeps emitted sentences so an interrupted
 reply is stored, and kept in the LLM context, as the text sent to the client.
 
-``shown`` sits before the output transport and records caption messages.
-``settled`` sits after the output transport and tracks reply boundaries; the
-assistant aggregator settles them when it starts processing those boundaries.
+The WebSocket output transport records a caption after a successful send.
+``shown`` snapshots interruptions and ``settled`` tracks reply boundaries
+after the output transport.
 """
 
 from __future__ import annotations
@@ -24,6 +24,12 @@ from pipecat.frames.frames import (
     OutputTransportMessageUrgentFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.transports.base_transport import BaseTransport
+from pipecat.transports.websocket.fastapi import (
+    FastAPIWebsocketClient,
+    FastAPIWebsocketOutputTransport,
+    FastAPIWebsocketParams,
+)
 
 from onecx_pipecat.pipeline.serializer import caption_text
 from onecx_pipecat.protocol import AssistantText
@@ -38,7 +44,6 @@ class CaptionLedger:
         self._pending: deque[str] = deque()
         self._interrupted: deque[tuple[int | None, str]] = deque()
         self._reconciling: dict[int, asyncio.Event] = {}
-        self._reconciliation_failed = False
         self.shown = _CaptionsShown(self)
         self.settled = _CaptionsSettled(self)
 
@@ -51,7 +56,7 @@ class CaptionLedger:
         return ""
 
     def record(self, text: str) -> None:
-        """A caption was queued for the client transport."""
+        """A caption was successfully sent to the client transport."""
         self._pending.append(text)
 
     def interrupt(self, frame_id: int | None = None) -> None:
@@ -64,16 +69,13 @@ class CaptionLedger:
     def begin_reconciliation(self, frame_id: int) -> None:
         self._reconciling.setdefault(frame_id, asyncio.Event())
 
-    def finish_reconciliation(self, frame_id: int, *, failed: bool = False) -> None:
-        self._reconciliation_failed |= failed
+    def finish_reconciliation(self, frame_id: int) -> None:
         if event := self._reconciling.pop(frame_id, None):
             event.set()
 
     async def wait_for_reconciliation(self) -> None:
         while self._reconciling:
             await asyncio.gather(*(event.wait() for event in self._reconciling.values()))
-        if self._reconciliation_failed:
-            raise RuntimeError("Interrupted assistant context could not be reconciled")
 
     def settle(self, count: int) -> str:
         """Remove and return the captions of a reply that finished playing."""
@@ -81,6 +83,33 @@ class CaptionLedger:
         for _ in range(min(count, len(self._pending))):
             settled.append(self._pending.popleft().strip())
         return " ".join(text for text in settled if text)
+
+
+class CaptionWebsocketOutputTransport(FastAPIWebsocketOutputTransport):
+    """Records captions only after the WebSocket transport successfully sends them."""
+
+    def __init__(
+        self,
+        transport: BaseTransport,
+        client: FastAPIWebsocketClient,
+        params: FastAPIWebsocketParams,
+        *,
+        ledger: CaptionLedger,
+        **kwargs,
+    ) -> None:
+        super().__init__(transport, client, params, **kwargs)
+        self._ledger = ledger
+
+    async def send_message(self, frame: OutputTransportMessageUrgentFrame) -> None:
+        delivered = await self._write_frame(frame)
+        message = frame.message
+        if (
+            delivered
+            and isinstance(message, dict)
+            and message.get("kind") == _CAPTION
+            and isinstance(message.get("text"), str)
+        ):
+            self._ledger.record(message["text"])
 
 
 class _CaptionsShown(FrameProcessor):
@@ -92,10 +121,6 @@ class _CaptionsShown(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, InterruptionFrame | CancelFrame):
             self._ledger.interrupt(frame.id)
-        elif isinstance(frame, OutputTransportMessageUrgentFrame):
-            message = frame.message
-            if isinstance(message, dict) and message.get("kind") == _CAPTION:
-                self._ledger.record(message.get("text") or "")
         await self.push_frame(frame, direction)
 
 

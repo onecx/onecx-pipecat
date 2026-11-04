@@ -28,6 +28,16 @@ _AUDIO = base64.b64encode(b"\x01\x00" * 160).decode("ascii")
 _CHUNKS, _CHUNK_MS = 3, 100
 
 
+class LongPlaybackTTS(InMemoryTTS):
+    async def run_tts(self, text: str, context_id: str):
+        yield TTSAudioRawFrame(
+            b"\x00\x00" * self.sample_rate,
+            self.sample_rate,
+            1,
+            context_id=context_id,
+        )
+
+
 @pytest.fixture
 def slow_tts(monkeypatch):
     # A long multi-sentence reply, played in real time, gives the client time to
@@ -113,7 +123,7 @@ def test_each_caption_reaches_the_client_before_its_audio_has_played(slow_tts):
         _until(ws, "session_closed")
 
 
-def test_caption_arrives_while_tts_is_still_streaming(monkeypatch):
+def test_caption_waits_for_synthesis_to_finish(monkeypatch):
     release = threading.Event()
     finished = threading.Event()
 
@@ -138,17 +148,19 @@ def test_caption_arrives_while_tts_is_still_streaming(monkeypatch):
             _speak(ws)
             while True:
                 event = ws.receive_json()
-                if event["kind"] in {"assistant_text", "assistant_audio"}:
+                if event["kind"] == "assistant_audio":
                     break
-            assert event["kind"] == "assistant_text"
-            assert event["text"] == "One sentence."
+            assert event["kind"] == "assistant_audio"
             assert not finished.is_set()
-            assert _until(ws, "assistant_audio")[-1]["kind"] == "assistant_audio"
+            release.set()
+            events = _until(ws, "assistant_text")
+            assert events[-1]["text"] == "One sentence."
+            assert finished.is_set()
         finally:
             release.set()
 
 
-def test_barge_in_after_caption_before_any_audio_keeps_the_caption(monkeypatch):
+def test_barge_in_during_synthesis_does_not_publish_a_caption(monkeypatch):
     release = threading.Event()
 
     class DelayedTTS(InMemoryTTS):
@@ -172,21 +184,21 @@ def test_barge_in_after_caption_before_any_audio_keeps_the_caption(monkeypatch):
         try:
             _start(ws)
             _speak(ws)
-            events = _until(ws, "assistant_text")
-            assert not any(e["kind"] == "assistant_audio" for e in events)
+            assert not release.wait(timeout=0.1)
             ws.send_json({"type": "user_started_speaking"})
-            events += _until(ws, "turn_complete")
+            events = _until(ws, "interrupted")
             assert not any(e["kind"] == "assistant_audio" for e in events)
+            assert not any(e["kind"] == "assistant_text" for e in events)
+            ws.send_json({"type": "stop"})
+            _until(ws, "session_closed")
         finally:
             release.set()
 
     assistant = [e for e in persistence.entries if e.kind is VoiceEntryKind.ASSISTANT]
-    assert [(e.status, e.text) for e in assistant] == [
-        (VoiceEntryStatus.INTERRUPTED, "Visible before audio.")
-    ]
+    assert assistant == []
 
 
-def test_barge_in_keeps_caption_if_assistant_aggregator_has_not_started(monkeypatch):
+def test_barge_in_during_synthesis_before_aggregator_start_has_no_caption(monkeypatch):
     release_start = threading.Event()
     release_tts = threading.Event()
     start_waiting = threading.Event()
@@ -228,30 +240,28 @@ def test_barge_in_keeps_caption_if_assistant_aggregator_has_not_started(monkeypa
         try:
             _start(ws)
             _speak(ws)
-            _until(ws, "assistant_text")
+            assert not release_tts.wait(timeout=0.1)
             assert start_waiting.wait(timeout=3)
             ws.send_json({"type": "user_started_speaking"})
-            _until(ws, "interrupted")
-            assert persisted.wait(timeout=2)
+            events = _until(ws, "interrupted")
+            assert not any(e["kind"] == "assistant_text" for e in events)
         finally:
             release_start.set()
             release_tts.set()
 
     assistant = [e for e in persistence.entries if e.kind is VoiceEntryKind.ASSISTANT]
-    assert [(e.status, e.text) for e in assistant] == [
-        (VoiceEntryStatus.INTERRUPTED, "Caption before start.")
-    ]
+    assert assistant == []
 
 
 @pytest.mark.parametrize("ending", ["stop", "disconnect"])
 def test_ending_session_persists_caption_before_audio(monkeypatch, ending):
-    release_tts = threading.Event()
     persisted = threading.Event()
 
-    class DelayedTTS(InMemoryTTS):
+    class LongPlaybackTTS(InMemoryTTS):
         async def run_tts(self, text: str, context_id: str):
-            await asyncio.to_thread(release_tts.wait)
-            yield TTSAudioRawFrame(b"\x00\x00" * 1600, self.sample_rate, 1, context_id=context_id)
+            yield TTSAudioRawFrame(
+                b"\x00\x00" * self.sample_rate, self.sample_rate, 1, context_id=context_id
+            )
 
     class SlowPersistence(FakePersistence):
         async def append(self, session_id, entry, **kwargs):
@@ -268,25 +278,22 @@ def test_ending_session_persists_caption_before_audio(monkeypatch, ending):
     monkeypatch.setattr(
         session_module,
         "build_tts_service",
-        lambda settings, language: DelayedTTS(sample_rate=settings.speech.sample_rate_hz),
+        lambda settings, language: LongPlaybackTTS(sample_rate=settings.speech.sample_rate_hz),
     )
     container = fake_container(token="t-1")
     persistence = SlowPersistence()
     container.persistence = persistence  # type: ignore[assignment]
     client = TestClient(create_app(container))
     with client.websocket_connect("/ws/voice") as ws:
-        try:
-            _start(ws)
-            _speak(ws)
-            _until(ws, "assistant_text")
-            if ending == "stop":
-                ws.send_json({"type": "stop"})
-                _until(ws, "session_closed")
-            else:
-                ws.close()
-                assert persisted.wait(timeout=3)
-        finally:
-            release_tts.set()
+        _start(ws)
+        _speak(ws)
+        _until(ws, "assistant_text")
+        if ending == "stop":
+            ws.send_json({"type": "stop"})
+            _until(ws, "session_closed")
+        else:
+            ws.close()
+            assert persisted.wait(timeout=3)
 
     assistant = [e for e in persistence.entries if e.kind is VoiceEntryKind.ASSISTANT]
     assert [(e.status, e.text) for e in assistant] == [
@@ -433,7 +440,6 @@ def test_next_user_entry_waits_for_delayed_completion_callback(monkeypatch):
 
 
 def test_next_inference_contains_the_interrupted_caption_before_the_next_user_turn(monkeypatch):
-    release = threading.Event()
     contexts = []
 
     class RecordingLLM(InMemoryLLM):
@@ -443,36 +449,27 @@ def test_next_inference_contains_the_interrupted_caption_before_the_next_user_tu
                 self._reply = f"Reply {len(contexts)}."
             await super().process_frame(frame, direction)
 
-    class DelayedFirstTTS(InMemoryTTS):
-        async def run_tts(self, text: str, context_id: str):
-            if text == "Reply 1.":
-                await asyncio.to_thread(release.wait)
-            yield TTSAudioRawFrame(b"\x00\x00" * 1600, self.sample_rate, 1, context_id=context_id)
-
     monkeypatch.setattr(session_module, "build_llm", lambda *args: RecordingLLM())
     monkeypatch.setattr(
         session_module,
         "build_tts_service",
-        lambda settings, language: DelayedFirstTTS(sample_rate=settings.speech.sample_rate_hz),
+        lambda settings, language: LongPlaybackTTS(sample_rate=settings.speech.sample_rate_hz),
     )
     container = fake_container(token="t-1")
     persistence = FakePersistence()
     container.persistence = persistence  # type: ignore[assignment]
     client = TestClient(create_app(container))
     with client.websocket_connect("/ws/voice") as ws:
-        try:
-            _start(ws)
-            _speak(ws)
-            _until(ws, "assistant_text")
-            _speak(ws)
-            completions = 0
-            while completions < 2:
-                if ws.receive_json()["kind"] == "turn_complete":
-                    completions += 1
-            ws.send_json({"type": "stop"})
-            _until(ws, "session_closed")
-        finally:
-            release.set()
+        _start(ws)
+        _speak(ws)
+        _until(ws, "assistant_text")
+        _speak(ws)
+        completions = 0
+        while completions < 2:
+            if ws.receive_json()["kind"] == "turn_complete":
+                completions += 1
+        ws.send_json({"type": "stop"})
+        _until(ws, "session_closed")
 
     assert len(contexts) == 2
     assert [(m["role"], m.get("content")) for m in contexts[1]] == [
@@ -489,7 +486,6 @@ def test_next_inference_contains_the_interrupted_caption_before_the_next_user_tu
 
 
 def test_next_inference_has_interrupted_context_even_if_stop_handler_is_delayed(monkeypatch):
-    release_tts = threading.Event()
     release_handler = threading.Event()
     handler_waiting = threading.Event()
     second_inference = threading.Event()
@@ -511,18 +507,12 @@ def test_next_inference_has_interrupted_context_even_if_stop_handler_is_delayed(
                     second_inference.set()
             await super().process_frame(frame, direction)
 
-    class DelayedFirstTTS(InMemoryTTS):
-        async def run_tts(self, text: str, context_id: str):
-            if text == "Reply 1.":
-                await asyncio.to_thread(release_tts.wait)
-            yield TTSAudioRawFrame(b"\x00\x00" * 1600, self.sample_rate, 1, context_id=context_id)
-
     monkeypatch.setattr(LLMAssistantAggregator, "_run_handler", delayed_handler)
     monkeypatch.setattr(session_module, "build_llm", lambda *args: RecordingLLM())
     monkeypatch.setattr(
         session_module,
         "build_tts_service",
-        lambda settings, language: DelayedFirstTTS(sample_rate=settings.speech.sample_rate_hz),
+        lambda settings, language: LongPlaybackTTS(sample_rate=settings.speech.sample_rate_hz),
     )
     client = TestClient(create_app(fake_container(token="t-1")))
     with client.websocket_connect("/ws/voice") as ws:
@@ -541,7 +531,6 @@ def test_next_inference_has_interrupted_context_even_if_stop_handler_is_delayed(
             _until(ws, "assistant_text")
         finally:
             release_handler.set()
-            release_tts.set()
 
     assert [(m["role"], m.get("content")) for m in contexts[1][1:]] == [
         ("user", "in-memory transcript"),
@@ -551,7 +540,6 @@ def test_next_inference_has_interrupted_context_even_if_stop_handler_is_delayed(
 
 
 def test_next_inference_waits_until_interruption_is_reconciled(monkeypatch):
-    release_tts = threading.Event()
     release_interruption = threading.Event()
     interruption_waiting = threading.Event()
     second_inference = threading.Event()
@@ -577,18 +565,12 @@ def test_next_inference_waits_until_interruption_is_reconciled(monkeypatch):
                     second_inference.set()
             await super().process_frame(frame, direction)
 
-    class DelayedFirstTTS(InMemoryTTS):
-        async def run_tts(self, text: str, context_id: str):
-            if text == "Reply 1.":
-                await asyncio.to_thread(release_tts.wait)
-            yield TTSAudioRawFrame(b"\x00\x00" * 1600, self.sample_rate, 1, context_id=context_id)
-
     monkeypatch.setattr(LLMAssistantAggregator, "process_frame", delayed_interruption)
     monkeypatch.setattr(session_module, "build_llm", lambda *args: RecordingLLM())
     monkeypatch.setattr(
         session_module,
         "build_tts_service",
-        lambda settings, language: DelayedFirstTTS(sample_rate=settings.speech.sample_rate_hz),
+        lambda settings, language: LongPlaybackTTS(sample_rate=settings.speech.sample_rate_hz),
     )
     client = TestClient(create_app(fake_container(token="t-1")))
     with client.websocket_connect("/ws/voice") as ws:
@@ -608,7 +590,6 @@ def test_next_inference_waits_until_interruption_is_reconciled(monkeypatch):
             assert second_inference.is_set()
         finally:
             release_interruption.set()
-            release_tts.set()
 
     assert [(m["role"], m.get("content")) for m in contexts[1][1:]] == [
         ("user", "in-memory transcript"),
@@ -618,7 +599,6 @@ def test_next_inference_waits_until_interruption_is_reconciled(monkeypatch):
 
 
 def test_next_user_entry_waits_for_interrupted_reply_to_be_saved(monkeypatch):
-    release_tts = threading.Event()
     release_save = threading.Event()
     save_waiting = threading.Event()
 
@@ -643,17 +623,11 @@ def test_next_user_entry_waits_for_interrupted_reply_to_be_saved(monkeypatch):
                 self._reply = f"Reply {self.turn}."
             await super().process_frame(frame, direction)
 
-    class DelayedFirstTTS(InMemoryTTS):
-        async def run_tts(self, text: str, context_id: str):
-            if text == "Reply 1.":
-                await asyncio.to_thread(release_tts.wait)
-            yield TTSAudioRawFrame(b"\x00\x00" * 1600, self.sample_rate, 1, context_id=context_id)
-
     monkeypatch.setattr(session_module, "build_llm", lambda *args: RecordingLLM())
     monkeypatch.setattr(
         session_module,
         "build_tts_service",
-        lambda settings, language: DelayedFirstTTS(sample_rate=settings.speech.sample_rate_hz),
+        lambda settings, language: LongPlaybackTTS(sample_rate=settings.speech.sample_rate_hz),
     )
     container = fake_container(token="t-1")
     persistence = SlowAssistantPersistence()
@@ -672,9 +646,10 @@ def test_next_user_entry_waits_for_interrupted_reply_to_be_saved(monkeypatch):
             completed = 0
             while completed < 2:
                 completed += ws.receive_json()["kind"] == "turn_complete"
+            ws.send_json({"type": "stop"})
+            _until(ws, "session_closed")
         finally:
             release_save.set()
-            release_tts.set()
 
     assert [entry.kind for entry in persistence.entries] == [
         VoiceEntryKind.HUMAN,
@@ -685,7 +660,6 @@ def test_next_user_entry_waits_for_interrupted_reply_to_be_saved(monkeypatch):
 
 
 def test_rapid_interruptions_keep_each_reply_with_its_user_turn(monkeypatch):
-    release_tts = threading.Event()
     contexts = []
 
     class RecordingLLM(InMemoryLLM):
@@ -695,34 +669,25 @@ def test_rapid_interruptions_keep_each_reply_with_its_user_turn(monkeypatch):
                 self._reply = f"Reply {len(contexts)}."
             await super().process_frame(frame, direction)
 
-    class DelayedTTS(InMemoryTTS):
-        async def run_tts(self, text: str, context_id: str):
-            if text in {"Reply 1.", "Reply 2."}:
-                await asyncio.to_thread(release_tts.wait)
-            yield TTSAudioRawFrame(b"\x00\x00" * 1600, self.sample_rate, 1, context_id=context_id)
-
     monkeypatch.setattr(session_module, "build_llm", lambda *args: RecordingLLM())
     monkeypatch.setattr(
         session_module,
         "build_tts_service",
-        lambda settings, language: DelayedTTS(sample_rate=settings.speech.sample_rate_hz),
+        lambda settings, language: LongPlaybackTTS(sample_rate=settings.speech.sample_rate_hz),
     )
     container = fake_container(token="t-1")
     persistence = FakePersistence()
     container.persistence = persistence  # type: ignore[assignment]
     client = TestClient(create_app(container))
     with client.websocket_connect("/ws/voice") as ws:
-        try:
-            _start(ws)
-            events = []
-            for number in range(1, 4):
-                _speak(ws)
-                events.extend(_until(ws, "assistant_text"))
-                assert events[-1]["text"] == f"Reply {number}."
-            while sum(event["kind"] == "turn_complete" for event in events) < 3:
-                events.append(ws.receive_json())
-        finally:
-            release_tts.set()
+        _start(ws)
+        events = []
+        for number in range(1, 4):
+            _speak(ws)
+            events.extend(_until(ws, "assistant_text"))
+            assert events[-1]["text"] == f"Reply {number}."
+        while sum(event["kind"] == "turn_complete" for event in events) < 3:
+            events.append(ws.receive_json())
 
     assert [(m["role"], m.get("content")) for m in contexts[2][1:]] == [
         ("user", "in-memory transcript"),
@@ -742,7 +707,6 @@ def test_rapid_interruptions_keep_each_reply_with_its_user_turn(monkeypatch):
 
 
 def test_tool_followup_can_stream_and_be_interrupted(monkeypatch):
-    release = threading.Event()
     contexts = []
     tool_call = {"role": "assistant", "tool_calls": [{"id": "call-1"}]}
     tool_result = {"role": "tool", "tool_call_id": "call-1", "content": "done"}
@@ -761,37 +725,28 @@ def test_tool_followup_can_stream_and_be_interrupted(monkeypatch):
                     LLMMessagesAppendFrame(messages=[tool_call, tool_result], run_llm=True)
                 )
 
-    class DelayedFollowupTTS(InMemoryTTS):
-        async def run_tts(self, text: str, context_id: str):
-            if text == "Done.":
-                await asyncio.to_thread(release.wait)
-            yield TTSAudioRawFrame(b"\x00\x00" * 1600, self.sample_rate, 1, context_id=context_id)
-
     monkeypatch.setattr(session_module, "build_llm", lambda *args: ToolFollowupLLM())
     monkeypatch.setattr(
         session_module,
         "build_tts_service",
-        lambda settings, language: DelayedFollowupTTS(sample_rate=settings.speech.sample_rate_hz),
+        lambda settings, language: LongPlaybackTTS(sample_rate=settings.speech.sample_rate_hz),
     )
     container = fake_container(token="t-1")
     persistence = FakePersistence()
     container.persistence = persistence  # type: ignore[assignment]
     client = TestClient(create_app(container))
     with client.websocket_connect("/ws/voice") as ws:
-        try:
-            _start(ws)
-            _speak(ws)
-            captions, completed = [], 0
-            while captions != ["Checking.", "Done."]:
-                event = ws.receive_json()
-                if event["kind"] == "assistant_text":
-                    captions.append(event["text"])
-                completed += event["kind"] == "turn_complete"
-            ws.send_json({"type": "user_started_speaking"})
-            while completed < 2:
-                completed += ws.receive_json()["kind"] == "turn_complete"
-        finally:
-            release.set()
+        _start(ws)
+        _speak(ws)
+        captions, completed = [], 0
+        while captions != ["Checking.", "Done."]:
+            event = ws.receive_json()
+            if event["kind"] == "assistant_text":
+                captions.append(event["text"])
+            completed += event["kind"] == "turn_complete"
+        ws.send_json({"type": "user_started_speaking"})
+        while completed < 2:
+            completed += ws.receive_json()["kind"] == "turn_complete"
 
     assert len(contexts) == 2
     assert tool_call in contexts[1] and tool_result in contexts[1]

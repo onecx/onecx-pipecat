@@ -69,7 +69,7 @@ class Transcript(BaseModel):
 
 
 class AssistantText(BaseModel):
-    """One sentence of the assistant's reply, sent before its audio."""
+    """One sentence of the assistant's reply, sent after its synthesis attempt."""
 
     kind: Literal["assistant_text"] = "assistant_text"
     text: str
