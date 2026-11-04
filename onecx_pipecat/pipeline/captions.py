@@ -1,19 +1,18 @@
-"""Tracks assistant captions emitted after synthesis but before audio finishes.
+"""Accounts for written assistant captions before audio playback finishes.
 
-Captions (``assistant_text``) are sent after synthesis, while the assistant
-aggregator after the output transport only collects the sentences that were
-actually played. ``CaptionLedger`` keeps emitted sentences so an interrupted
-reply is stored, and kept in the LLM context, as the text sent to the client.
+Captions are written urgently after synthesis, independently of audio playback.
+The output transport records only successful writes and snapshots pending
+captions before forwarding an interruption. TTS context IDs bind recorded
+captions to response boundaries without changing the wire protocol.
 
-The WebSocket output transport records a caption after a successful send.
-``shown`` snapshots interruptions and ``settled`` tracks reply boundaries
-after the output transport.
+Pipecat swallows WebSocket send errors; a successful write is not a browser
+receipt or render acknowledgement.
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections import deque
+from dataclasses import dataclass
 
 from pipecat.frames.frames import (
     CancelFrame,
@@ -29,6 +28,7 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketClient,
     FastAPIWebsocketOutputTransport,
     FastAPIWebsocketParams,
+    FastAPIWebsocketTransport,
 )
 
 from onecx_pipecat.pipeline.serializer import caption_text
@@ -38,13 +38,16 @@ _CAPTION = AssistantText.model_fields["kind"].default
 _REPLY_END = (LLMFullResponseEndFrame, LLMAssistantPushAggregationFrame)
 
 
+@dataclass
+class CaptionMessageFrame(OutputTransportMessageUrgentFrame):
+    context_id: str | None
+
+
 class CaptionLedger:
     def __init__(self) -> None:
         # Captions sent to the client whose reply has not finished playing, oldest first.
-        self._pending: deque[str] = deque()
+        self._pending: deque[tuple[str | None, str]] = deque()
         self._interrupted: deque[tuple[int | None, str]] = deque()
-        self._reconciling: dict[int, asyncio.Event] = {}
-        self.shown = _CaptionsShown(self)
         self.settled = _CaptionsSettled(self)
 
     def take_interrupted(self, frame_id: int | None = None) -> str:
@@ -55,38 +58,38 @@ class CaptionLedger:
                 return text
         return ""
 
-    def record(self, text: str) -> None:
+    def record(self, context_id: str | None, text: str) -> None:
         """A caption was successfully sent to the client transport."""
-        self._pending.append(text)
+        self._pending.append((context_id, text))
 
     def interrupt(self, frame_id: int | None = None) -> None:
         """Snapshot the captions of every reply still playing."""
-        text = " ".join(t.strip() for t in self._pending if t.strip())
+        text = " ".join(text.strip() for _, text in self._pending if text.strip())
         if text:
             self._interrupted.append((frame_id, text))
         self._pending.clear()
 
-    def begin_reconciliation(self, frame_id: int) -> None:
-        self._reconciling.setdefault(frame_id, asyncio.Event())
-
-    def finish_reconciliation(self, frame_id: int) -> None:
-        if event := self._reconciling.pop(frame_id, None):
-            event.set()
-
-    async def wait_for_reconciliation(self) -> None:
-        while self._reconciling:
-            await asyncio.gather(*(event.wait() for event in self._reconciling.values()))
-
-    def settle(self, count: int) -> str:
+    def settle(self, context_ids: list[str | None]) -> str:
         """Remove and return the captions of a reply that finished playing."""
+        ids = set(context_ids)
         settled = []
-        for _ in range(min(count, len(self._pending))):
-            settled.append(self._pending.popleft().strip())
+        pending = deque()
+        while self._pending:
+            context_id, text = self._pending.popleft()
+            if context_id in ids:
+                settled.append(text.strip())
+            else:
+                pending.append((context_id, text))
+        self._pending = pending
         return " ".join(text for text in settled if text)
 
 
 class CaptionWebsocketOutputTransport(FastAPIWebsocketOutputTransport):
-    """Records captions only after the WebSocket transport successfully sends them."""
+    """Records captions only when Pipecat reports a successful WebSocket write.
+
+    Pipecat swallows socket send errors, so a successful write does not prove
+    that the browser received or rendered the caption.
+    """
 
     def __init__(
         self,
@@ -100,49 +103,65 @@ class CaptionWebsocketOutputTransport(FastAPIWebsocketOutputTransport):
         super().__init__(transport, client, params, **kwargs)
         self._ledger = ledger
 
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        if direction is FrameDirection.DOWNSTREAM and isinstance(
+            frame, InterruptionFrame | CancelFrame
+        ):
+            self._ledger.interrupt(frame.id)
+        await super().process_frame(frame, direction)
+
     async def send_message(self, frame: OutputTransportMessageUrgentFrame) -> None:
         delivered = await self._write_frame(frame)
         message = frame.message
         if (
             delivered
+            and isinstance(frame, CaptionMessageFrame)
             and isinstance(message, dict)
             and message.get("kind") == _CAPTION
             and isinstance(message.get("text"), str)
         ):
-            self._ledger.record(message["text"])
-
-
-class _CaptionsShown(FrameProcessor):
-    def __init__(self, ledger: CaptionLedger) -> None:
-        super().__init__(name="CaptionsShown")
-        self._ledger = ledger
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        await super().process_frame(frame, direction)
-        if isinstance(frame, InterruptionFrame | CancelFrame):
-            self._ledger.interrupt(frame.id)
-        await self.push_frame(frame, direction)
+            self._ledger.record(frame.context_id, message["text"])
 
 
 class _CaptionsSettled(FrameProcessor):
     def __init__(self, ledger: CaptionLedger) -> None:
         super().__init__(name="CaptionsSettled")
         self._ledger = ledger
-        self._emitted = 0
-        self._boundaries: dict[int, int] = {}
+        self._context_ids: list[str | None] = []
+        self._boundaries: dict[int, list[str | None]] = {}
 
     def complete(self, frame: Frame) -> str:
         """Settle a boundary when the assistant aggregator starts processing it."""
-        return self._ledger.settle(self._boundaries.pop(frame.id, 0))
+        return self._ledger.settle(self._boundaries.pop(frame.id, []))
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
         if isinstance(frame, InterruptionFrame | CancelFrame):
-            self._emitted = 0
+            self._context_ids.clear()
             self._boundaries.clear()
         elif direction is FrameDirection.DOWNSTREAM and caption_text(frame) is not None:
-            self._emitted += 1
+            self._context_ids.append(getattr(frame, "context_id", None))
         elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, _REPLY_END):
-            self._boundaries[frame.id] = self._emitted
-            self._emitted = 0
+            self._boundaries[frame.id] = self._context_ids
+            self._context_ids = []
         await self.push_frame(frame, direction)
+
+
+def install_caption_transport(
+    transport: FastAPIWebsocketTransport, ledger: CaptionLedger
+) -> CaptionWebsocketOutputTransport:
+    """Replace Pipecat's output processor using the pinned 1.8 transport API."""
+    output = transport.output()
+    if not isinstance(output, FastAPIWebsocketOutputTransport):
+        raise RuntimeError("Pipecat websocket transport output has an unsupported type")
+    replacement = CaptionWebsocketOutputTransport(
+        transport,
+        transport._client,
+        transport._params,
+        ledger=ledger,
+        name=transport._output_name,
+    )
+    transport._output = replacement
+    if transport.output() is not replacement:
+        raise RuntimeError("Could not install caption websocket output transport")
+    return replacement

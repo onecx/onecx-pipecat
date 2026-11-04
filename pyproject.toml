@@ -4,7 +4,7 @@ version = "0.0.1"
 description = "Pipecat application foundation for authenticated voice sessions."
 requires-python = ">=3.11,<4.0"
 dependencies = [
-    "pipecat-ai[mcp,anthropic,aws]>=1.8.0,<2.0.0",
+    "pipecat-ai[mcp,anthropic,aws]>=1.8.0,<1.9.0",
     "fastapi>=0.110,<1.0.0",
     "uvicorn[standard]>=0.29,<1.0.0",
     "pydantic>=2.6,<3.0.0",

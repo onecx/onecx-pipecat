@@ -7,6 +7,13 @@ from fastapi.websockets import WebSocketDisconnect
 from onecx_pipecat.app import create_app
 from onecx_pipecat.container import AppContainer
 from tests.fakes import FakePersistence, fake_container
+from tests.voice_helpers import (
+    _receive_json_bounded,
+    _speak,
+    _until,
+    end_session,
+    wait_for_close,
+)
 
 _AUDIO = base64.b64encode(b"\x01\x00" * 160).decode("ascii")
 
@@ -24,26 +31,11 @@ def _start(token: str = "t-1") -> dict:
     }
 
 
-def _until(ws, kind: str) -> list[dict]:
-    events = []
-    while True:
-        event = ws.receive_json()
-        events.append(event)
-        if event["kind"] == kind:
-            return events
-
-
-def _speak(ws) -> None:
-    ws.send_json({"type": "user_started_speaking"})
-    ws.send_json({"type": "audio", "audio": _AUDIO})
-    ws.send_json({"type": "user_stopped_speaking"})
-
-
 def test_ws_rejects_token_in_url():
     client = TestClient(create_app(_container()))
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect("/ws/voice?token=t-1") as ws:
-            ws.receive_json()
+            _receive_json_bounded(ws)
 
 
 @pytest.mark.parametrize(
@@ -53,17 +45,17 @@ def test_ws_rejects_any_query_parameter(query):
     client = TestClient(create_app(_container()))
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect(f"/ws/voice?{query}") as ws:
-            ws.receive_json()
+            _receive_json_bounded(ws)
 
 
 def test_ws_failed_start_sends_error_then_closes_with_policy_violation():
     client = TestClient(create_app(_container()))
     with client.websocket_connect("/ws/voice") as ws:
         ws.send_json(_start(token="nope"))
-        assert ws.receive_json()["code"] == "authentication_failed"
-        assert ws.receive_json()["kind"] == "session_closed"
+        assert _receive_json_bounded(ws)["code"] == "authentication_failed"
+        assert _receive_json_bounded(ws)["kind"] == "session_closed"
         with pytest.raises(WebSocketDisconnect) as closed:
-            ws.receive_json()
+            _receive_json_bounded(ws)
         assert closed.value.code == 1008
 
 
@@ -71,24 +63,23 @@ def test_ws_malformed_handshake_is_reported_and_ignored():
     client = TestClient(create_app(_container()))
     with client.websocket_connect("/ws/voice") as ws:
         ws.send_json({"type": "nonsense"})
-        assert ws.receive_json()["code"] == "bad_command"
+        assert _receive_json_bounded(ws)["code"] == "bad_command"
         ws.send_text("not json")
-        assert ws.receive_json()["code"] == "bad_command"
+        assert _receive_json_bounded(ws)["code"] == "bad_command"
         ws.send_json({"type": "audio", "audio": _AUDIO})
-        assert ws.receive_json()["code"] == "bad_command"
+        assert _receive_json_bounded(ws)["code"] == "bad_command"
         ws.send_json(_start())
-        ready = ws.receive_json()
+        ready = _receive_json_bounded(ws)
         assert ready["kind"] == "session_ready"
         assert ready["schema_version"] == "1"
-        ws.send_json({"type": "stop"})
-        assert _until(ws, "session_closed")[-1]["reason"] == "client_stopped"
+        end_session(ws)
 
 
 def test_ws_voice_turn_streams_transcript_text_audio_and_completion():
     client = TestClient(create_app(_container()))
     with client.websocket_connect("/ws/voice") as ws:
         ws.send_json(_start())
-        assert ws.receive_json()["kind"] == "session_ready"
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
         _speak(ws)
         events = _until(ws, "turn_complete")
         kinds = {e["kind"] for e in events}
@@ -99,9 +90,7 @@ def test_ws_voice_turn_streams_transcript_text_audio_and_completion():
 
         ws.send_json({"type": "stop"})
         assert _until(ws, "session_closed")[-1]["reason"] == "client_stopped"
-        with pytest.raises(WebSocketDisconnect) as closed:
-            ws.receive_json()
-        assert closed.value.code == 1000
+        assert wait_for_close(ws)["code"] == 1000
 
 
 def test_ws_turn_is_persisted():
@@ -111,11 +100,10 @@ def test_ws_turn_is_persisted():
     client = TestClient(create_app(container))
     with client.websocket_connect("/ws/voice") as ws:
         ws.send_json(_start())
-        ws.receive_json()
+        _receive_json_bounded(ws)
         _speak(ws)
         _until(ws, "turn_complete")
-        ws.send_json({"type": "stop"})
-        _until(ws, "session_closed")
+        end_session(ws)
     assert [e.kind.value for e in persistence.entries] == ["HUMAN", "ASSISTANT"]
     assert persistence.entries[0].text == "in-memory transcript"
 
@@ -124,11 +112,12 @@ def test_ws_malformed_message_while_running_is_reported_and_session_continues():
     client = TestClient(create_app(_container()))
     with client.websocket_connect("/ws/voice") as ws:
         ws.send_json(_start())
-        ws.receive_json()
+        _receive_json_bounded(ws)
         ws.send_json({"type": "nonsense"})
         assert _until(ws, "error")[-1]["code"] == "bad_command"
         _speak(ws)
         _until(ws, "turn_complete")
+        end_session(ws)
 
 
 def test_ws_refresh_token_keeps_the_session_alive():
@@ -137,21 +126,21 @@ def test_ws_refresh_token_keeps_the_session_alive():
     client = TestClient(create_app(container))
     with client.websocket_connect("/ws/voice") as ws:
         ws.send_json(_start())
-        ws.receive_json()
+        _receive_json_bounded(ws)
         ws.send_json({"type": "refresh_token", "apm_principal_token": "t-2"})
         _speak(ws)
         _until(ws, "turn_complete")
+        end_session(ws)
 
 
 def test_ws_refresh_with_a_bad_token_is_a_typed_error():
     client = TestClient(create_app(_container()))
     with client.websocket_connect("/ws/voice") as ws:
         ws.send_json(_start())
-        ws.receive_json()
+        _receive_json_bounded(ws)
         ws.send_json({"type": "refresh_token", "apm_principal_token": "bogus"})
         assert _until(ws, "error")[-1]["code"] == "authentication_failed"
-        ws.send_json({"type": "stop"})
-        _until(ws, "session_closed")
+        end_session(ws)
 
 
 def test_ws_idle_session_is_ended_at_token_expiry():
@@ -159,10 +148,10 @@ def test_ws_idle_session_is_ended_at_token_expiry():
     client = TestClient(create_app(container, expiry_check_seconds=0.05))
     with client.websocket_connect("/ws/voice") as ws:
         ws.send_json(_start())
-        assert ws.receive_json()["kind"] == "session_ready"
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
         container.auth.mark_expired("t-1")
         assert _until(ws, "error")[-1]["code"] == "token_expired"
-        assert ws.receive_json()["kind"] == "session_closed"
+        assert _receive_json_bounded(ws)["kind"] == "session_closed"
         with pytest.raises(WebSocketDisconnect) as closed:
-            ws.receive_json()
+            _receive_json_bounded(ws)
         assert closed.value.code == 1008

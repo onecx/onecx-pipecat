@@ -48,8 +48,9 @@ accepted.
 [source]
 ----
 transport.input() -> session control -> STT -> transcript events -> user aggregator
-  -> context sync -> LLM -> context sync -> TTS -> wire events -> caption ledger
-  -> transport.output() -> caption ledger -> assistant aggregator
+  -> context sync -> LLM -> context sync -> TTS -> wire events
+  -> transport.output() [records/snapshots captions] -> captions settled
+  -> assistant aggregator
 ----
 
 * `transport.input()` / `transport.output()` are Pipecat's
@@ -134,8 +135,8 @@ Example turn with server VAD:
 {"kind": "transcript", "text": "what is the weather", "state": "FINAL"}
 {"kind": "user_stopped_speaking"}
 {"kind": "bot_started_speaking"}
-{"kind": "assistant_audio", "audio": "AAAA...", "sample_rate": 16000, "num_channels": 1}
 {"kind": "assistant_text", "text": "It is sunny."}
+{"kind": "assistant_audio", "audio": "AAAA...", "sample_rate": 16000, "num_channels": 1}
 {"kind": "bot_stopped_speaking"}
 {"kind": "turn_complete", "entry_id": "abc:2"}
 ----
@@ -148,13 +149,13 @@ With client turn detection the audio is wrapped in `user_started_speaking` and
 * *Turn:* speech followed by a pause (VAD) or `user_started_speaking`, audio,
 `user_stopped_speaking` (client). The user aggregator adds the final transcript to the
 LLM context and triggers the LLM; the reply is spoken sentence by sentence.
-Each sentence's `assistant_text` is sent after its synthesis attempt completes
-and urgently, independently of the output transport's real-time audio pacing.
-Audio may start before its caption arrives; on a functioning connection the
-caption does not wait for that sentence's audio playback to finish. There is no
-browser-render acknowledgement, so this does not guarantee when the client
-paints the text. A handled TTS failure still emits the sentence as a text-only
-fallback; synthesis cancelled by interruption does not.
+Each sentence's `assistant_text` is written to the WebSocket after its
+synthesis attempt completes and urgently, independently of the output
+transport's real-time audio pacing. The caption does not wait for that
+sentence's audio playback to finish. There is no browser-render acknowledgement:
+a successful write does not prove that the browser received or rendered the
+caption. A handled TTS failure still emits the sentence as a text-only fallback;
+synthesis cancelled by interruption does not.
 * *Barge-in:* a user turn that starts while the assistant speaks (detected
 speech, or `user_started_speaking`) makes the user
 aggregator broadcast an `InterruptionFrame`. Pending LLM and TTS output is
@@ -201,6 +202,7 @@ and close code 1008. Checked periodically, also while idle.
 * `stt_failed`, `llm_failed`, `tts_failed` — service failures. Provider failures
 are non-fatal; unrecoverable interrupted-context inconsistency reports
 `llm_failed` and closes the session rather than allowing further inference.
+The final `session_closed` reason is `context_inconsistent`.
 * `persistence_failed` — see above.
 
 == Closing

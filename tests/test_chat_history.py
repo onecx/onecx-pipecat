@@ -1,5 +1,3 @@
-import base64
-
 from fastapi.testclient import TestClient
 from pipecat.frames.frames import LLMContextFrame
 from pipecat.processors.frame_processor import FrameDirection
@@ -10,8 +8,8 @@ from onecx_pipecat.protocol import StartSession
 from onecx_pipecat.services.inmemory import InMemoryLLM
 from onecx_pipecat.session import SessionState, VoiceSession
 from tests.fakes import FakePersistence, fake_container
+from tests.voice_helpers import _receive_json_bounded, _speak, _until_bounded, end_session
 
-_AUDIO = base64.b64encode(b"\x01\x00" * 160).decode("ascii")
 _HISTORY = [
     {"role": "user", "content": "earlier question"},
     {"role": "assistant", "content": "earlier answer"},
@@ -50,15 +48,10 @@ def test_chat_history_seeds_the_llm_context_and_turns_are_saved_to_the_chat(monk
     client = TestClient(create_app(container))
     with client.websocket_connect("/ws/voice") as ws:
         ws.send_json(_start_message())
-        assert ws.receive_json()["kind"] == "session_ready"
-        ws.send_json({"type": "user_started_speaking"})
-        ws.send_json({"type": "audio", "audio": _AUDIO})
-        ws.send_json({"type": "user_stopped_speaking"})
-        while ws.receive_json()["kind"] != "turn_complete":
-            pass
-        ws.send_json({"type": "stop"})
-        while ws.receive_json()["kind"] != "session_closed":
-            pass
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
+        _speak(ws)
+        _until_bounded(ws, "turn_complete")
+        end_session(ws)
     messages = RecordingLLM.seen[0]
     assert [m["role"] for m in messages[:3]] == ["system", "user", "assistant"]
     assert [m["content"] for m in messages[1:3]] == ["earlier question", "earlier answer"]

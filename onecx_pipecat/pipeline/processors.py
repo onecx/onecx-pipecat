@@ -17,6 +17,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
+from onecx_pipecat.pipeline.captions import CaptionMessageFrame
 from onecx_pipecat.pipeline.serializer import BAD_COMMAND, wire_event
 from onecx_pipecat.protocol import (
     Command,
@@ -87,7 +88,13 @@ class WireEvents(FrameProcessor):
             and isinstance(frame, self._urgent)
             and (event := wire_event(frame)) is not None
         ):
-            await self.push_frame(OutputTransportMessageUrgentFrame(message=event.model_dump()))
+            message = event.model_dump()
+            if isinstance(frame, TTSTextFrame):
+                await self.push_frame(
+                    CaptionMessageFrame(message=message, context_id=frame.context_id)
+                )
+            else:
+                await self.push_frame(OutputTransportMessageUrgentFrame(message=message))
         await self.push_frame(frame, direction)
         if direction is FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseEndFrame):
             self._response_active = False

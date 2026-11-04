@@ -11,6 +11,7 @@ from onecx_pipecat.config import Settings, SpeechSettings
 from onecx_pipecat.services.inmemory import InMemoryLLM, InMemoryTTS
 from onecx_pipecat.services.speech import build_vad_analyzer
 from tests.fakes import FakeVAD, fake_container
+from tests.voice_helpers import _receive_json_bounded, _until_bounded, end_session, wait_for_close
 
 _VOICE = base64.b64encode(b"\x01\x10" * 160).decode("ascii")
 _SILENCE = base64.b64encode(b"\x00\x00" * 160).decode("ascii")
@@ -30,7 +31,7 @@ def _start(ws) -> None:
             "apm_principal_token": "t-1",
         }
     )
-    assert ws.receive_json()["kind"] == "session_ready"
+    assert _receive_json_bounded(ws)["kind"] == "session_ready"
 
 
 def _say(ws, *, voiced: int = 10, silent: int = 20) -> None:
@@ -40,28 +41,19 @@ def _say(ws, *, voiced: int = 10, silent: int = 20) -> None:
         ws.send_json({"type": "audio", "audio": _SILENCE})
 
 
-def _until(ws, kind: str) -> list[dict]:
-    events = []
-    while True:
-        events.append(ws.receive_json())
-        if events[-1]["kind"] == kind:
-            return events
-
-
 def test_speech_then_a_pause_completes_a_turn_without_client_turn_messages(vad):
     client = TestClient(create_app(fake_container(token="t-1")))
     with client.websocket_connect("/ws/voice") as ws:
         _start(ws)
         _say(ws)
-        events = _until(ws, "turn_complete")
+        events = _until_bounded(ws, "turn_complete")
         kinds = [e["kind"] for e in events]
         assert kinds.index("user_started_speaking") < kinds.index("user_stopped_speaking")
         assert kinds.index("user_stopped_speaking") < kinds.index("assistant_text")
         final = [e for e in events if e["kind"] == "transcript" and e["state"] == "FINAL"]
         assert final[-1]["text"] == "in-memory transcript"
 
-        ws.send_json({"type": "stop"})
-        _until(ws, "session_closed")
+        end_session(ws)
 
 
 def test_silence_alone_never_opens_a_turn(vad):
@@ -70,7 +62,8 @@ def test_silence_alone_never_opens_a_turn(vad):
         _start(ws)
         _say(ws, voiced=0, silent=30)
         ws.send_json({"type": "stop"})
-        kinds = [e["kind"] for e in _until(ws, "session_closed")]
+        kinds = [e["kind"] for e in _until_bounded(ws, "session_closed")]
+        wait_for_close(ws)
         assert "user_started_speaking" not in kinds
         assert "turn_complete" not in kinds
 
@@ -92,14 +85,13 @@ def test_speaking_over_the_bot_interrupts_it(vad, monkeypatch):
     with client.websocket_connect("/ws/voice") as ws:
         _start(ws)
         _say(ws)
-        _until(ws, "assistant_text")
+        _until_bounded(ws, "assistant_text")
 
         _say(ws)
-        kinds = [e["kind"] for e in _until(ws, "interrupted")]
+        kinds = [e["kind"] for e in _until_bounded(ws, "interrupted")]
         assert "user_started_speaking" in kinds
 
-        ws.send_json({"type": "stop"})
-        _until(ws, "session_closed")
+        end_session(ws)
 
 
 def test_client_turn_detection_builds_no_vad():

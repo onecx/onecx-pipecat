@@ -1,13 +1,13 @@
 """Assembles the long-lived Pipecat pipeline of one voice session.
 
 ``transport.input() -> control -> stt -> transcripts -> user aggregator
--> context sync -> llm -> context sync -> tts -> wire events -> captions shown
+-> context sync -> llm -> context sync -> tts -> wire events
 -> transport.output() -> captions settled -> assistant aggregator``
 
 Captions (``assistant_text``) are sent after sentence synthesis completes and
 urgently, independently of audio playback, which the output transport paces in
-real time. The caption ledger remembers what was emitted so an interrupted
-reply is persisted as the sentences sent to the client, not only the ones played.
+real time. The transport records successful caption writes and snapshots
+pending captions when it processes an interruption.
 
 Turn boundaries come either from a VAD analyzer in the user aggregator
 (``speech.turn_detection=vad``: the user turn starts on speech and ends after a
@@ -52,7 +52,11 @@ from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserT
 
 from onecx_pipecat.config import Settings
 from onecx_pipecat.models import VoiceEntry
-from onecx_pipecat.pipeline.captions import CaptionLedger, CaptionWebsocketOutputTransport
+from onecx_pipecat.pipeline.captions import (
+    CaptionLedger,
+    CaptionWebsocketOutputTransport,
+    install_caption_transport,
+)
 from onecx_pipecat.pipeline.persistence import attach_persistence
 from onecx_pipecat.pipeline.processors import SessionControl, WireEvents
 from onecx_pipecat.pipeline.serializer import OnecxFrameSerializer
@@ -105,13 +109,8 @@ def build_voice_pipeline(
     aggregators = LLMContextAggregatorPair(context, user_params=_user_params(vad_analyzer))
     user, assistant = aggregators.user(), aggregators.assistant()
     captions = CaptionLedger()
-    transport._output = CaptionWebsocketOutputTransport(
-        transport,
-        transport._client,
-        transport._params,
-        ledger=captions,
-        name=transport._output_name,
-    )
+    install_caption_transport(transport, captions)
+    assert isinstance(transport.output(), CaptionWebsocketOutputTransport)
     context_in, context_out = attach_persistence(
         user,
         assistant,
@@ -142,7 +141,6 @@ def build_voice_pipeline(
                     TTSTextFrame,
                 ),
             ),
-            captions.shown,
             transport.output(),
             captions.settled,
             assistant,

@@ -15,6 +15,7 @@ exposed to the LLM.
 from __future__ import annotations
 
 import asyncio
+import logging
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -63,6 +64,7 @@ from onecx_pipecat.services.speech import (
 )
 
 _NORMAL_CLOSURE = 1000
+logger = logging.getLogger(__name__)
 
 
 class SessionState(StrEnum):
@@ -205,8 +207,12 @@ class VoiceSession:
                 await run_worker(self._worker)
             finally:
                 if self._fatal_task is not None:
-                    await self._fatal_task
-                    self._fatal_task = None
+                    try:
+                        await self._fatal_task
+                    except Exception:
+                        logger.exception("Fatal context-failure shutdown task failed")
+                    finally:
+                        self._fatal_task = None
                 self._worker = None
         self.state = SessionState.CLOSED
         try:
@@ -237,7 +243,7 @@ class VoiceSession:
 
     async def _fatal_context_failure(self, _failure: Exception) -> None:
         """Close rather than continue when interrupted context cannot be reconciled."""
-        if self._fatal_task is not None:
+        if self._ended or self._fatal_task is not None:
             return
         events: list[Event] = [
             ErrorEvent(code="llm_failed", message="language model context could not be reconciled"),

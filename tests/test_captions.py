@@ -1,134 +1,184 @@
+from types import SimpleNamespace
+
+import pytest
 from pipecat.frames.frames import (
-    Frame,
     InterruptionFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     OutputTransportMessageUrgentFrame,
     TTSTextFrame,
 )
-from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.tests.utils import SleepFrame, run_test
+from pipecat.transports.websocket.fastapi import (
+    FastAPIWebsocketOutputTransport,
+    FastAPIWebsocketParams,
+    FastAPIWebsocketTransport,
+)
+from starlette.websockets import WebSocketState
 
-from onecx_pipecat.pipeline.captions import CaptionLedger
+from onecx_pipecat.pipeline.captions import (
+    CaptionLedger,
+    CaptionMessageFrame,
+    CaptionWebsocketOutputTransport,
+    install_caption_transport,
+)
 from onecx_pipecat.pipeline.processors import WireEvents
-from onecx_pipecat.protocol import AssistantText
+from onecx_pipecat.pipeline.serializer import OnecxFrameSerializer
 
 
-def _shown(text: str) -> OutputTransportMessageUrgentFrame:
-    return OutputTransportMessageUrgentFrame(message=AssistantText(text=text).model_dump())
+class _Output(CaptionWebsocketOutputTransport):
+    def __init__(self, ledger: CaptionLedger, *, delivered: bool = True) -> None:
+        super().__init__(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            FastAPIWebsocketParams(serializer=OnecxFrameSerializer()),
+            ledger=ledger,
+        )
+        self.delivered = delivered
+
+    async def _write_frame(self, _frame) -> bool:
+        return self.delivered
+
+    async def push_frame(self, _frame, _direction) -> None:
+        pass
+
+    async def _handle_frame(self, _frame) -> None:
+        pass
 
 
-def _reached_transport(text: str) -> TTSTextFrame:
-    frame = TTSTextFrame(text, aggregated_by="sentence")
+def _tts(text: str, context_id: str) -> TTSTextFrame:
+    frame = TTSTextFrame(text, aggregated_by="sentence", context_id=context_id)
     frame.will_be_spoken = True
     return frame
 
 
-async def _run(ledger: CaptionLedger, *frames) -> None:
-    class Delivered(FrameProcessor):
-        async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-            await super().process_frame(frame, direction)
-            if isinstance(frame, OutputTransportMessageUrgentFrame):
-                message = frame.message
-                if isinstance(message, dict) and message.get("kind") == "assistant_text":
-                    ledger.record(message.get("text", ""))
-            await self.push_frame(frame, direction)
+async def _wire_caption(frame: TTSTextFrame) -> CaptionMessageFrame:
+    wire = WireEvents(urgent=(TTSTextFrame,))
+    outgoing = []
 
-    class Assistant(FrameProcessor):
-        async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-            await super().process_frame(frame, direction)
-            await self.push_frame(frame, direction)
+    async def capture(message, _direction=None) -> None:
+        outgoing.append(message)
 
-    assistant = Assistant()
-
-    @assistant.event_handler("on_after_process_frame")
-    async def after_frame(_assistant, frame: Frame) -> None:
-        ledger.settled.complete(frame)
-
-    # Pauses let the data frames settle before the next system frame overtakes them.
-    paced = [f for frame in frames for f in (frame, SleepFrame(sleep=0.02))]
-    await run_test(
-        Pipeline([ledger.shown, Delivered(), ledger.settled, assistant]), frames_to_send=paced
-    )
+    wire.push_frame = capture
+    await wire.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
+    await wire.process_frame(frame, FrameDirection.DOWNSTREAM)
+    return next(message for message in outgoing if isinstance(message, CaptionMessageFrame))
 
 
-async def test_interruption_keeps_every_shown_caption_of_the_playing_reply():
+async def _settle(ledger: CaptionLedger, context_id: str) -> str:
+    settled = ledger.settled
+
+    async def discard(_frame, _direction) -> None:
+        pass
+
+    settled.push_frame = discard
+    caption = _tts("boundary", context_id)
+    await settled.process_frame(caption, FrameDirection.DOWNSTREAM)
+    boundary = LLMFullResponseEndFrame()
+    await settled.process_frame(boundary, FrameDirection.DOWNSTREAM)
+    return settled.complete(boundary)
+
+
+async def test_transport_snapshots_every_caption_written_before_interruption(monkeypatch):
+    async def skip_base_process_frame(_self, _frame, _direction):
+        pass
+
+    monkeypatch.setattr(FastAPIWebsocketOutputTransport, "process_frame", skip_base_process_frame)
     ledger = CaptionLedger()
-    await _run(
-        ledger,
-        _shown("Sentence 1."),
-        _shown("Sentence 2."),
-        _shown("Sentence 3."),
-        _reached_transport("Sentence 1."),
-        InterruptionFrame(),
-    )
-    assert ledger.take_interrupted() == "Sentence 1. Sentence 2. Sentence 3."
-    assert ledger.take_interrupted() == ""
+    output = _Output(ledger)
+    for text in ("Sentence 1.", "Sentence 2."):
+        await output.send_message(await _wire_caption(_tts(text, "reply-1")))
+    await output.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+    assert ledger.take_interrupted() == "Sentence 1. Sentence 2."
 
 
-async def test_interruption_skips_replies_that_finished_playing():
+async def test_failed_write_is_not_recorded_or_consumed_by_later_reply():
     ledger = CaptionLedger()
-    await _run(
-        ledger,
-        _shown("Let me check."),
-        _shown("It is sunny."),
-        _reached_transport("Let me check."),
-        LLMFullResponseEndFrame(),
-        InterruptionFrame(),
-    )
-    assert ledger.take_interrupted() == "It is sunny."
+    output = _Output(ledger, delivered=False)
+    await output.send_message(await _wire_caption(_tts("Unwritten.", "reply-1")))
+    assert await _settle(ledger, "reply-1") == ""
+    output.delivered = True
+    await output.send_message(await _wire_caption(_tts("Next reply.", "reply-2")))
+    assert await _settle(ledger, "reply-2") == "Next reply."
 
 
-def test_interrupted_snapshots_survive_later_captions_and_interruptions():
+async def test_non_caption_transport_messages_are_not_recorded():
     ledger = CaptionLedger()
-    ledger.record("First reply.")
-    ledger.interrupt()
-    ledger.record("Second reply.")
+    output = _Output(ledger)
+    await output.send_message(
+        OutputTransportMessageUrgentFrame(message={"kind": "transcript", "text": "user words"})
+    )
+    assert ledger.settle(["reply-1"]) == ""
+
+
+async def test_settling_uses_context_identity_instead_of_caption_count():
+    ledger = CaptionLedger()
+    ledger.record("reply-1", "First reply.")
+    ledger.record("reply-2", "Second reply.")
+    assert ledger.settle(["reply-2"]) == "Second reply."
     ledger.interrupt()
     assert ledger.take_interrupted() == "First reply."
-    assert ledger.take_interrupted() == "Second reply."
-    assert ledger.take_interrupted() == ""
 
 
 def test_interrupted_snapshots_are_matched_to_their_interruption():
     ledger = CaptionLedger()
-    ledger.record("First reply.")
+    ledger.record("first", "First reply.")
     ledger.interrupt(1)
-    ledger.record("Second reply.")
+    ledger.record("second", "Second reply.")
     ledger.interrupt(2)
     assert ledger.take_interrupted(2) == "Second reply."
     assert ledger.take_interrupted(1) == "First reply."
 
 
-async def test_stale_synthesis_text_is_not_emitted_after_interruption():
-    class Collect(FrameProcessor):
-        def __init__(self) -> None:
-            super().__init__()
-            self.messages = []
+@pytest.mark.parametrize("closing", [False, True])
+async def test_real_transport_write_returns_false_for_a_closed_client(closing):
+    websocket = SimpleNamespace(
+        headers={},
+        client_state=(WebSocketState.CONNECTED if closing else WebSocketState.DISCONNECTED),
+        application_state=WebSocketState.CONNECTED,
+    )
+    transport = FastAPIWebsocketTransport(
+        websocket, FastAPIWebsocketParams(serializer=OnecxFrameSerializer())
+    )
+    output = install_caption_transport(transport, CaptionLedger())
+    if closing:
+        output._client._closing = True
+    assert transport.output() is output
+    assert (
+        await output._write_frame(
+            OutputTransportMessageUrgentFrame(message={"kind": "assistant_text", "text": "Hi"})
+        )
+        is False
+    )
 
-        async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-            await super().process_frame(frame, direction)
-            if isinstance(frame, OutputTransportMessageUrgentFrame):
-                self.messages.append(frame.message)
-            await self.push_frame(frame, direction)
 
-    def tts_text(text: str) -> TTSTextFrame:
-        frame = TTSTextFrame(text, aggregated_by="sentence")
-        frame.will_be_spoken = True
-        return frame
+async def test_stale_synthesis_text_is_not_emitted_after_interruption(monkeypatch):
+    async def skip_base_process_frame(_self, _frame, _direction):
+        pass
 
-    collect = Collect()
-    frames = [
-        LLMFullResponseStartFrame(),
-        InterruptionFrame(),
-        tts_text("cancelled"),
-        LLMFullResponseStartFrame(),
-        tts_text("active"),
-        LLMFullResponseEndFrame(),
-        tts_text("after response"),
+    monkeypatch.setattr(FrameProcessor, "process_frame", skip_base_process_frame)
+    ledger = CaptionLedger()
+    output = _Output(ledger)
+    wire = WireEvents(urgent=(TTSTextFrame,))
+    outgoing = []
+
+    async def capture(message, direction=None) -> None:
+        outgoing.append(message)
+        if isinstance(message, CaptionMessageFrame):
+            await output.send_message(message)
+        elif isinstance(message, InterruptionFrame):
+            ledger.interrupt(message.id)
+
+    wire.push_frame = capture
+    await wire.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
+    await wire.process_frame(_tts("cancelled", "old"), FrameDirection.DOWNSTREAM)
+    await wire.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+    await wire.process_frame(_tts("stale after interruption", "old"), FrameDirection.DOWNSTREAM)
+    await wire.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
+    await wire.process_frame(_tts("active", "new"), FrameDirection.DOWNSTREAM)
+    await wire.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
+    await wire.process_frame(_tts("after response", "new"), FrameDirection.DOWNSTREAM)
+    captions = [
+        frame.message["text"] for frame in outgoing if isinstance(frame, CaptionMessageFrame)
     ]
-    paced = [frame for item in frames for frame in (item, SleepFrame(sleep=0.01))]
-    await run_test(Pipeline([WireEvents(urgent=(TTSTextFrame,)), collect]), frames_to_send=paced)
-
-    assert [message["text"] for message in collect.messages] == ["active"]
+    assert captions == ["cancelled", "active"]
