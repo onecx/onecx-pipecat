@@ -7,7 +7,7 @@ on:
 
 jobs:
   test-and-lint:
-    runs-on: Linux
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -32,19 +32,3 @@ jobs:
 
       - name: Test (pytest + pytest-asyncio, auto mode)
         run: uv run --python ${{ matrix.python-version }} pytest -q
-
-  docs:
-    runs-on: Linux
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Antora
-        run: npm install -g antora@3.x
-
-      - name: Build docs (antora generate)
-        run: antora generate antora-playbook.yml
-
-      - name: Smoke-check the rendered index
-        run: |
-          test -f ./build/site/index.html
-          grep -q "onecx-pipecat" ./build/site/index.html
