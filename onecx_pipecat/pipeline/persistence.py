@@ -32,7 +32,7 @@ _TEARDOWN_SAVE_TIMEOUT_SECS = 20
 
 
 class _ContextSync(FrameProcessor):
-    """Wait for interrupted context updates without holding control frames."""
+    """Wait for interrupted reply reconciliation before passing context frames."""
 
     def __init__(
         self,

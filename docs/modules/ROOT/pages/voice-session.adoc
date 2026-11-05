@@ -70,8 +70,9 @@ arrived (`SpeechTimeoutUserTurnStopStrategy`). The client only streams audio.
 allowed MCP tools plus `activate_skill` when the agent has usable skills.
 MCP tool calls go through `VoiceSession.invoke_tool`, which keeps the
 `ALWAYS_ALLOW` check, the no-redirect rule and the user-token propagation.
-Context synchronization reconciles interrupted replies before the next LLM
-inference without waiting for an entire reply or blocking tool-control frames.
+Before the next LLM inference, context synchronization waits for any interrupted
+reply reconciliation to finish. Context frames passing through the sync
+processor are held during that wait.
 * The pipeline idle timeout is `ONECX_PIPELINE__IDLE_TIMEOUT_SECS` (default:
 disabled; the session ends at token expiry).
 

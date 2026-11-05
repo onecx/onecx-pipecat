@@ -140,6 +140,10 @@ async def test_real_transport_write_returns_false_for_a_closed_client(closing):
     transport = FastAPIWebsocketTransport(
         websocket, FastAPIWebsocketParams(serializer=OnecxFrameSerializer())
     )
+    assert all(
+        hasattr(transport, attribute)
+        for attribute in ("_client", "_params", "_output_name", "_output")
+    )
     output = install_caption_transport(transport, CaptionLedger())
     if closing:
         output._client._closing = True
