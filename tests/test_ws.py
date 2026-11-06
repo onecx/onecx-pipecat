@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from fastapi.websockets import WebSocketDisconnect
 
 from onecx_pipecat.app import create_app
+from onecx_pipecat.config import Settings, VoiceSettings
 from onecx_pipecat.container import AppContainer
 from tests.fakes import FakePersistence, fake_container
 from tests.voice_helpers import (
@@ -158,13 +159,21 @@ def test_ws_idle_session_is_ended_at_token_expiry():
 
 
 def _same_host_container() -> AppContainer:
-    from onecx_pipecat.config import Settings, VoiceSettings
-
     container = _container()
     container.settings = Settings(
         llm=container.settings.llm,
         speech=container.settings.speech,
         voice=VoiceSettings(origin_policy="same-host"),
+    )
+    return container
+
+
+def _off_container() -> AppContainer:
+    container = _container()
+    container.settings = Settings(
+        llm=container.settings.llm,
+        speech=container.settings.speech,
+        voice=VoiceSettings(origin_policy="off"),
     )
     return container
 
@@ -224,3 +233,21 @@ def test_ws_same_host_rejects_a_null_origin():
             _receive_json_bounded(ws)
         assert closed.value.code == 1008
         assert closed.value.reason == "origin_not_allowed"
+
+
+def test_ws_off_policy_allows_any_origin():
+    # ``off`` skips the check: a foreign origin still opens a session. Intended
+    # for tests and local development only.
+    client = TestClient(create_app(_off_container()))
+    with client.websocket_connect("/ws/voice", headers={"origin": "https://evil.example"}) as ws:
+        ws.send_json(_start())
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
+        end_session(ws)
+
+
+def test_ws_off_policy_allows_a_missing_origin():
+    client = TestClient(create_app(_off_container()))
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.send_json(_start())
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
+        end_session(ws)

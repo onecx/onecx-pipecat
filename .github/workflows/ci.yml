@@ -30,5 +30,34 @@ jobs:
       - name: Format check (ruff)
         run: uv run --python ${{ matrix.python-version }} ruff format --check .
 
-      - name: Test (pytest + pytest-asyncio, auto mode)
-        run: uv run --python ${{ matrix.python-version }} pytest -q
+      - name: Test (pytest + pytest-asyncio, auto mode, with coverage)
+        run: |
+          uv run --python ${{ matrix.python-version }} pytest -q \
+            --cov \
+            --cov-report=term-missing:skip-covered \
+            --cov-report=xml:coverage-${{ matrix.python-version }}.xml \
+            --cov-report=html:coverage-html-${{ matrix.python-version }} \
+            | tee pytest-${{ matrix.python-version }}.log
+
+      - name: Coverage summary in job summary
+        if: always()
+        run: |
+          {
+            echo "## Coverage (Python ${{ matrix.python-version }})"
+            echo
+            echo '```'
+            uv run --python ${{ matrix.python-version }} python -m coverage report --skip-covered
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-py${{ matrix.python-version }}
+          path: |
+            coverage-${{ matrix.python-version }}.xml
+            coverage-html-${{ matrix.python-version }}/
+            pytest-${{ matrix.python-version }}.log
+          if-no-files-found: error
+          retention-days: 14

@@ -332,8 +332,20 @@ addressed to. The comparison is hostname-only (scheme and port are ignored), so
 the browser origin and the WebSocket host must share a hostname but may differ
 in port or scheme. A missing, `null` or unparseable `Origin` is rejected with
 WebSocket close code `1008` and reason `origin_not_allowed` before any session
-state is created. A different host works only if the policy is relaxed, which
-is up to the environment; the application itself serves at `/ws/voice`, so with
+state is created.
+
+IMPORTANT: `same-host` compares the `Origin` hostname to the `Host` header the
+application sees. The ingress or proxy in front of the pod must therefore
+preserve the public `Host` (the one the browser used). If the proxy rewrites
+`Host` to an in-cluster name (for example `onecx-pipecat.default.svc`), the
+public `Origin` no longer matches and every connection is rejected. With
+Traefik this is the default behaviour; with ingress-nginx set
+`nginx.ingress.kubernetes.io/preserve-hosts: "true"` or use
+`spec.rules[].host` (the controller preserves it by default when the rule has a
+host). Verify with the `Host` header of a real `/ws/voice` upgrade.
+
+A different host works only if the policy is relaxed, which is up to the
+environment; the application itself serves at `/ws/voice`, so with
 `path: /ws/voice` no rewrite is needed. If a prefix is used (for example
 `/voice/ws/voice`), the prefix must be stripped before the request reaches the
 pod (a strip-prefix Middleware for Traefik, a `rewrite-target` with capture

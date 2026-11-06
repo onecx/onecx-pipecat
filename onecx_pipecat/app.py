@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import suppress
 from dataclasses import asdict
 from importlib import metadata
@@ -20,6 +21,8 @@ from onecx_pipecat.session import SessionState, VoiceSession
 _WS_POLICY_VIOLATION = 1008
 # Close reason sent when the browser origin is not allowed to open a session.
 _WS_ORIGIN_NOT_ALLOWED = "origin_not_allowed"
+
+logger = logging.getLogger(__name__)
 
 
 def _pipecat_version() -> str:
@@ -80,6 +83,11 @@ def create_app(container: AppContainer, expiry_check_seconds: float = 5.0) -> Fa
         # Reject disallowed browser origins before any session state is created
         # so the client receives a clear close reason instead of a silent drop.
         if not _origin_allowed(websocket, container.settings.voice.origin_policy):
+            logger.info(
+                "Rejected voice WebSocket: origin %r not allowed by policy %r",
+                websocket.headers.get("origin"),
+                container.settings.voice.origin_policy,
+            )
             await websocket.close(code=_WS_POLICY_VIOLATION, reason=_WS_ORIGIN_NOT_ALLOWED)
             return
         session = VoiceSession(uuid4().hex, container)
