@@ -14,7 +14,7 @@ from onecx_pipecat.adapters.auth import AuthenticationError
 from onecx_pipecat.adapters.chat import ChatAccessError
 from onecx_pipecat.adapters.mcp import McpDiscovery, McpToolResult
 from onecx_pipecat.adapters.persistence import PersistenceError
-from onecx_pipecat.config import LlmSettings, Settings, SpeechSettings
+from onecx_pipecat.config import LlmSettings, Settings, SpeechSettings, VoiceSettings
 from onecx_pipecat.container import AppContainer
 from onecx_pipecat.models import (
     AgentConfigSnapshot,
@@ -150,6 +150,7 @@ def fake_container(
         Settings(
             llm=LlmSettings(provider_override="inmemory"),
             speech=SpeechSettings(turn_detection="client"),
+            voice=VoiceSettings(origin_policy="off"),
         )
     )
     auth, chat, agent_config = FakeAuth(), FakeChat(), FakeAgentConfig()

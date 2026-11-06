@@ -324,15 +324,21 @@ setting.
 
 .Recommended topology
 Serve `/ws/voice` on the *same origin as chat-ui* (the same host, path-based).
-The application has no CORS or `Origin` check, so a different host works only
-if nothing in the path enforces an origin and the browser allows the
-connection; that is up to the environment. The application itself serves at
-`/ws/voice`, so with `path: /ws/voice` no rewrite is needed. If a prefix is
-used (for example `/voice/ws/voice`), the prefix must be stripped before the
-request reaches the pod (a strip-prefix Middleware for Traefik, a
-`rewrite-target` with capture groups for ingress-nginx) and the WebSocket URL
-configured in chat-ui must match the public path. The chart does not provide
-this rewrite.
+The application checks the browser `Origin` header before creating a voice
+session: the default policy `deny` rejects every connection, so set
+`ONECX_VOICE__ORIGIN_POLICY=same-host` (already set in `helm/values.yaml`) to
+accept origins whose hostname equals the host the WebSocket request was
+addressed to. The comparison is hostname-only (scheme and port are ignored), so
+the browser origin and the WebSocket host must share a hostname but may differ
+in port or scheme. A missing, `null` or unparseable `Origin` is rejected with
+WebSocket close code `1008` and reason `origin_not_allowed` before any session
+state is created. A different host works only if the policy is relaxed, which
+is up to the environment; the application itself serves at `/ws/voice`, so with
+`path: /ws/voice` no rewrite is needed. If a prefix is used (for example
+`/voice/ws/voice`), the prefix must be stripped before the request reaches the
+pod (a strip-prefix Middleware for Traefik, a `rewrite-target` with capture
+groups for ingress-nginx) and the WebSocket URL configured in chat-ui must
+match the public path. The chart does not provide this rewrite.
 
 Nothing between the browser and the pod may append *query parameters*. Tokens
 travel in the first message, and any query string makes the application refuse
@@ -531,6 +537,14 @@ the agents use.
 | `app.routing.*`
 | See <<exposing-ws-voice>>
 | Yes if the browser must reach `/ws/voice`; off by default.
+
+| Voice origin policy (`ONECX_VOICE__ORIGIN_POLICY`)
+| `app.env`
+| `same-host`
+| Yes when routing is enabled. The default `deny` rejects every browser
+connection; `same-host` accepts origins whose hostname equals the WebSocket
+host (see <<exposing-ws-voice>>). Set in `helm/values.yaml`; override per
+environment only to tighten, not to relax.
 
 | Provider API keys (`ONECX_CREDENTIALS__REFS`)
 | Secret + `app.envCustom`, or `app.env_secrets`

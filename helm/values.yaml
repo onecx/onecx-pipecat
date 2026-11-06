@@ -41,6 +41,12 @@ app:
     ONECX_SPEECH__TTS_PROVIDER: "aws"
     ONECX_SPEECH__REGION: "eu-central-1"
     ONECX_SPEECH__SAMPLE_RATE_HZ: "16000"
+    # Voice WebSocket origin check. The app default ``deny`` rejects every
+    # browser connection; ``same-host`` allows origins whose hostname equals
+    # the host the WebSocket request was addressed to (scheme and port are
+    # ignored). Set this in every environment where chat-ui offers voice, and
+    # serve /ws/voice on the same host as chat-ui (see deployment docs).
+    ONECX_VOICE__ORIGIN_POLICY: "same-host"
     # Environment-specific overrides (the app defaults already match the OneCX
     # in-cluster service names on port 8080):
     # ONECX_AUTH__JWKS: ""

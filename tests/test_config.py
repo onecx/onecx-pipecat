@@ -74,3 +74,13 @@ def test_explicit_issuer_wins_over_keycloak_url_and_realm(monkeypatch):
 def test_server_port_env_sets_port(monkeypatch):
     monkeypatch.setenv("SERVER_PORT", "9000")
     assert Settings().port == 9000
+
+
+def test_voice_origin_policy_defaults_to_deny():
+    s = Settings()
+    assert s.voice.origin_policy == "deny"
+
+
+def test_voice_origin_policy_env_override(monkeypatch):
+    monkeypatch.setenv("ONECX_VOICE__ORIGIN_POLICY", "same-host")
+    assert Settings(_env_file=None).voice.origin_policy == "same-host"

@@ -7,6 +7,7 @@ import json
 from contextlib import suppress
 from dataclasses import asdict
 from importlib import metadata
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -17,6 +18,8 @@ from onecx_pipecat.session import SessionState, VoiceSession
 
 # WebSocket close code for an unauthenticated or otherwise rejected connection.
 _WS_POLICY_VIOLATION = 1008
+# Close reason sent when the browser origin is not allowed to open a session.
+_WS_ORIGIN_NOT_ALLOWED = "origin_not_allowed"
 
 
 def _pipecat_version() -> str:
@@ -24,6 +27,33 @@ def _pipecat_version() -> str:
         return metadata.version("pipecat-ai")
     except metadata.PackageNotFoundError:
         return "unknown"
+
+
+def _origin_allowed(websocket: WebSocket, policy: str) -> bool:
+    """Return True when the browser origin may open a voice session.
+
+    ``off`` skips the check. ``deny`` rejects every connection (fail-closed).
+    ``same-host`` compares the ``Origin`` hostname to the host the WebSocket
+    request was addressed to (the ``Host`` header), ignoring scheme and port;
+    a missing, ``null`` or unparseable origin is rejected.
+    """
+    if policy == "off":
+        return True
+    if policy == "deny":
+        return False
+    origin = websocket.headers.get("origin")
+    if not origin or origin == "null":
+        return False
+    try:
+        origin_host = urlparse(origin).hostname
+    except ValueError:
+        return False
+    if not origin_host:
+        return False
+    request_host = websocket.headers.get("host", "").split(":", 1)[0]
+    if not request_host:
+        request_host = websocket.url.hostname or ""
+    return origin_host.lower() == request_host.lower()
 
 
 def create_app(container: AppContainer, expiry_check_seconds: float = 5.0) -> FastAPI:
@@ -47,6 +77,11 @@ def create_app(container: AppContainer, expiry_check_seconds: float = 5.0) -> Fa
             return
 
         await websocket.accept()
+        # Reject disallowed browser origins before any session state is created
+        # so the client receives a clear close reason instead of a silent drop.
+        if not _origin_allowed(websocket, container.settings.voice.origin_policy):
+            await websocket.close(code=_WS_POLICY_VIOLATION, reason=_WS_ORIGIN_NOT_ALLOWED)
+            return
         session = VoiceSession(uuid4().hex, container)
 
         async def send(events: list[Event]) -> None:

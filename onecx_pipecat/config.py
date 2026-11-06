@@ -162,6 +162,22 @@ class PipelineSettings(BaseSettings):
     idle_timeout_secs: float | None = None
 
 
+class VoiceSettings(BaseSettings):
+    """Access control for the ``/ws/voice`` WebSocket endpoint.
+
+    The browser ``Origin`` header is checked before a voice session is created
+    so that only the UI origins that serve chat-ui can open a session. The
+    policy is fail-closed: the default ``deny`` rejects every connection, and
+    ``same-host`` rejects any origin whose hostname differs from the host the
+    WebSocket request was addressed to (scheme and port are ignored). ``off``
+    skips the check and is intended for tests and local development only.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ONECX_VOICE__")
+
+    origin_policy: Literal["deny", "same-host", "off"] = "deny"
+
+
 class Settings(BaseSettings):
     """Root configuration for the Pipecat application.
 
@@ -190,6 +206,7 @@ class Settings(BaseSettings):
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
+    voice: VoiceSettings = Field(default_factory=VoiceSettings)
 
 
 @lru_cache

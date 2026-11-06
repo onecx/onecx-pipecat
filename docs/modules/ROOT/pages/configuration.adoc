@@ -180,6 +180,18 @@ come from each agent's configuration (`mcpServers[].url`).
 blank reference fails the session start closed (`config_unavailable`). Values
 are `SecretStr`: never logged, exposed by `/healthz`, or sent to the client.
 
+| `voice.origin_policy`
+| `deny`
+| Browser origin check for the `/ws/voice` WebSocket, read from
+`ONECX_VOICE__ORIGIN_POLICY`. `deny` (the default) rejects every connection
+(fail-closed). `same-host` accepts only origins whose hostname equals the host
+the WebSocket request was addressed to (the `Host` header); scheme and port are
+ignored, so a different port or scheme on the same hostname is allowed. A
+missing, `null` or unparseable `Origin` is rejected. `off` skips the check and
+is intended for tests and local development only. A rejected connection is
+closed with code `1008` and reason `origin_not_allowed` before any session is
+created.
+
 |===
 
 == LLM provider mapping
