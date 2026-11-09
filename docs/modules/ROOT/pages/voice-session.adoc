@@ -9,7 +9,10 @@ session has two phases on the same socket:
 socket to it. Pipecat's `FastAPIWebsocketTransport` and the OneCX frame
 serializer carry all further traffic.
 
-NOTE: Protocol version 2 replaces the earlier request/response turn protocol.
+NOTE: Protocol version 3 adds `ai_context` to `start_session` and the
+`context_update` command. The change is additive: `ai_context` defaults to an
+empty list, so version 2 clients keep working. Protocol version 2 replaced the
+earlier request/response turn protocol.
 The client streams audio; the server detects the turns (or, with
 `speech.turn_detection=client`, the client signals push-to-talk boundaries).
 
@@ -85,7 +88,10 @@ Messages are JSON objects with a `type` field.
 | `type` | Meaning
 
 | `start_session`
-| Handshake only. `agent_id`, `chat_id`, `apm_principal_token`, optional `authorization`.
+| Handshake only. `agent_id`, `chat_id`, `apm_principal_token`, optional `authorization`, optional `ai_context` (list of strings, at most 20 entries of at most 8000 characters each; a malformed or over-limit list rejects the command).
+
+| `context_update`
+| Replaces the page context (`ai_context`, same limits as `start_session`) used for the next LLM turn. Valid only after `session_ready`; the system prompt is rebuilt, so the change applies from the next user turn.
 
 | `user_started_speaking`
 | Client turn detection only: push-to-talk press. Starts a user turn and interrupts the assistant if it is speaking (barge-in).
