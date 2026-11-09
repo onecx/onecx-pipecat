@@ -58,7 +58,7 @@ transport.input() -> session control -> STT -> transcript events -> user aggrega
 
 * `transport.input()` / `transport.output()` are Pipecat's
 `FastAPIWebsocketTransport` with `OnecxFrameSerializer`.
-* *Session control* handles `refresh_token`, `stop` and malformed commands.
+* *Session control* handles `context_update`, `refresh_token`, `stop` and malformed commands.
 * *STT*, *LLM* and *TTS* are Pipecat services (AWS Transcribe / Polly and the
 agent's configured OpenAI, Ollama or Anthropic provider). With the `inmemory`
 speech provider and `ONECX_LLM__PROVIDER_OVERRIDE=inmemory` deterministic
