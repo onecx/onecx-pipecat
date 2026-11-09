@@ -69,17 +69,29 @@ _ERROR_MESSAGES = {
 }
 
 
+def build_llm_context(
+    system_prompt: str, history: list[dict[str, str]], tools: ToolsSchema
+) -> LLMContext:
+    return LLMContext(
+        messages=[{"role": "system", "content": system_prompt}, *history],
+        **({"tools": tools} if tools.standard_tools else {}),
+    )
+
+
+def set_system_prompt(context: LLMContext, system_prompt: str) -> None:
+    """Replace the system message at the head of ``context``; the rest of the history is kept."""
+    context.set_messages([{"role": "system", "content": system_prompt}, *context.messages[1:]])
+
+
 def build_voice_pipeline(
     *,
     websocket: WebSocket,
     session_id: str,
     settings: Settings,
-    system_prompt: str,
-    tools: ToolsSchema,
+    context: LLMContext,
     llm: FrameProcessor,
     stt: FrameProcessor,
     tts: FrameProcessor,
-    history: list[dict[str, str]],
     save_entry: Callable[[VoiceEntry], Awaitable[str]],
     dispatch: Callable[[Command], Awaitable[list[Event]]],
     fatal_context_failure: Callable[[Exception], Awaitable[None]],
@@ -102,10 +114,6 @@ def build_voice_pipeline(
     async def emit(event: Event) -> None:
         await worker.queue_frame(OutputTransportMessageUrgentFrame(message=event.model_dump()))
 
-    context = LLMContext(
-        messages=[{"role": "system", "content": system_prompt}, *history],
-        **({"tools": tools} if tools.standard_tools else {}),
-    )
     aggregators = LLMContextAggregatorPair(context, user_params=_user_params(vad_analyzer))
     user, assistant = aggregators.user(), aggregators.assistant()
     captions = CaptionLedger()

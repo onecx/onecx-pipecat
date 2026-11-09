@@ -29,8 +29,13 @@ def usable_skills(snapshot: AgentConfigSnapshot) -> list[SkillSnapshot]:
     )
 
 
-def compose_system_prompt(snapshot: AgentConfigSnapshot) -> str:
-    """Scaffold system prompt plus the available-skills block, joined by a blank line."""
+def compose_system_prompt(
+    snapshot: AgentConfigSnapshot, ai_context: list[str] | None = None
+) -> str:
+    """Scaffold prompt, skills block and page context, joined by a blank line.
+
+    The page context block mirrors ``ScaffoldPromptComposer`` in the Java runtime.
+    """
     blocks: list[str] = []
     if snapshot.system_prompt.strip():
         blocks.append(snapshot.system_prompt.strip())
@@ -42,4 +47,6 @@ def compose_system_prompt(snapshot: AgentConfigSnapshot) -> str:
             + "\n".join(lines)
             + "\nActivate a relevant skill before applying its instructions."
         )
+    if ai_context:
+        blocks.append("AI context:\n" + "\n".join(ai_context))
     return "\n\n".join(blocks)

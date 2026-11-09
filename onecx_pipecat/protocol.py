@@ -1,4 +1,4 @@
-"""Voice-session wire protocol (version 2).
+"""Voice-session wire protocol (version 3).
 
 The handshake commands (``start_session``) are plain JSON text messages handled
 by the endpoint before the Pipecat pipeline starts. Once the session is READY
@@ -18,7 +18,11 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
+
+# Bounds on page context sent by the client; larger input is rejected, not truncated.
+MAX_AI_CONTEXT_ENTRIES = 20
+MAX_AI_CONTEXT_ENTRY_CHARS = 8000
 
 
 class StartSession(BaseModel):
@@ -28,6 +32,8 @@ class StartSession(BaseModel):
     so the session can authenticate them and load the chat as the user.
     ``apm_principal_token`` and ``authorization`` are the raw token values the
     user's browser presents (the latter is the ``Authorization`` header value).
+    ``ai_context`` is the page context (JSON strings, as in the text chat's
+    ``requestContext.aiContext``) that applies at the start of the session.
     """
 
     type: Literal["start_session"] = "start_session"
@@ -35,6 +41,14 @@ class StartSession(BaseModel):
     chat_id: str
     apm_principal_token: str
     authorization: str = ""
+    ai_context: list[str] = []
+
+
+class ContextUpdate(BaseModel):
+    """Replace the page context; it applies from the next LLM turn on."""
+
+    type: Literal["context_update"] = "context_update"
+    ai_context: list[str] = []
 
 
 class RefreshToken(BaseModel):
@@ -51,7 +65,7 @@ class StopSession(BaseModel):
     type: Literal["stop"] = "stop"
 
 
-Command = StartSession | StopSession | RefreshToken
+Command = StartSession | StopSession | RefreshToken | ContextUpdate
 
 
 class SessionReady(BaseModel):
@@ -166,6 +180,18 @@ def _optional_str(raw: dict, key: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _ai_context(raw: dict) -> list[str] | None:
+    """Read the optional ``ai_context`` list; None when it is malformed or over the limits."""
+    value = raw.get("ai_context", [])
+    if not isinstance(value, list) or len(value) > MAX_AI_CONTEXT_ENTRIES:
+        return None
+    if not all(
+        isinstance(entry, str) and len(entry) <= MAX_AI_CONTEXT_ENTRY_CHARS for entry in value
+    ):
+        return None
+    return value
+
+
 def decode_command(raw: dict) -> Command | None:
     """Turn a decoded JSON object into a typed command, or None if invalid."""
     match raw.get("type"):
@@ -173,12 +199,14 @@ def decode_command(raw: dict) -> Command | None:
             agent_id = raw.get("agent_id")
             chat_id = raw.get("chat_id")
             apm_principal_token = _principal_token(raw)
+            ai_context = _ai_context(raw)
             if (
                 not isinstance(agent_id, str)
                 or not agent_id
                 or not isinstance(chat_id, str)
                 or not chat_id
                 or apm_principal_token is None
+                or ai_context is None
             ):
                 return None
             return StartSession(
@@ -186,7 +214,13 @@ def decode_command(raw: dict) -> Command | None:
                 chat_id=chat_id,
                 apm_principal_token=apm_principal_token,
                 authorization=_optional_str(raw, "authorization"),
+                ai_context=ai_context,
             )
+        case "context_update":
+            ai_context = _ai_context(raw)
+            if ai_context is None:
+                return None
+            return ContextUpdate(ai_context=ai_context)
         case "refresh_token":
             apm_principal_token = _principal_token(raw)
             if apm_principal_token is None:

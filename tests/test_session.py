@@ -1,4 +1,5 @@
 import pytest
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
 from onecx_pipecat.config import Settings, SpeechSettings
 from onecx_pipecat.container import AppContainer
@@ -11,7 +12,8 @@ from onecx_pipecat.models import (
     ProviderSnapshot,
     ToolRule,
 )
-from onecx_pipecat.protocol import RefreshToken, StartSession, StopSession
+from onecx_pipecat.pipeline.builder import build_llm_context
+from onecx_pipecat.protocol import ContextUpdate, RefreshToken, StartSession, StopSession
 from onecx_pipecat.session import SessionState, VoiceSession
 from tests.fakes import FakeAgentConfig, fake_container
 
@@ -233,6 +235,42 @@ async def test_expiry_is_detected_without_audio():
     events = session.check_expiry()
     assert [e.kind for e in events] == ["error", "session_closed"]
     assert session.state is SessionState.CLOSED
+
+
+async def test_start_puts_the_page_context_into_the_system_prompt():
+    session = _session(_container())
+    await session.dispatch(_start(ai_context=['{"event":"E1"}']))
+    assert session._current_system_prompt() == 'be brief\n\nAI context:\n{"event":"E1"}'
+
+
+async def test_context_update_replaces_the_context_in_the_live_llm_context():
+    session = _session(_container())
+    await session.dispatch(_start(ai_context=['{"event":"E1"}']))
+    session._llm_context = build_llm_context(
+        session._current_system_prompt(),
+        [{"role": "user", "content": "hi"}],
+        ToolsSchema(standard_tools=[]),
+    )
+
+    events = await session.dispatch(ContextUpdate(ai_context=['{"event":"E2"}']))
+
+    assert events == []
+    system = session._llm_context.messages[0]
+    assert system == {"role": "system", "content": 'be brief\n\nAI context:\n{"event":"E2"}'}
+    assert session._llm_context.messages[1] == {"role": "user", "content": "hi"}
+
+
+async def test_empty_context_update_removes_the_block():
+    session = _session(_container())
+    await session.dispatch(_start(ai_context=['{"event":"E1"}']))
+    await session.dispatch(ContextUpdate(ai_context=[]))
+    assert session._current_system_prompt() == "be brief"
+
+
+async def test_context_update_before_start_is_rejected():
+    session = _session(_container())
+    events = await session.dispatch(ContextUpdate(ai_context=["x"]))
+    assert [e.code for e in events] == ["illegal_state"]
 
 
 async def test_refresh_is_exempt_from_the_expiry_check():

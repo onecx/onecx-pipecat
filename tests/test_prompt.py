@@ -12,6 +12,15 @@ def test_prompt_without_skills_is_the_scaffold_prompt():
     assert compose_system_prompt(_snap("  be brief \n")) == "be brief"
 
 
+def test_ai_context_block_follows_the_prompt_like_the_java_runtime():
+    prompt = compose_system_prompt(_snap("be brief"), ['{"a":1}', '{"b":2}'])
+    assert prompt == 'be brief\n\nAI context:\n{"a":1}\n{"b":2}'
+
+
+def test_empty_ai_context_adds_no_block():
+    assert compose_system_prompt(_snap("be brief"), []) == "be brief"
+
+
 def test_empty_everything_is_empty():
     assert compose_system_prompt(_snap("")) == ""
 

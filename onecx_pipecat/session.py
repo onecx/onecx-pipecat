@@ -23,6 +23,7 @@ from uuid import uuid4
 from fastapi import WebSocket
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.pipeline.worker import PipelineWorker
+from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameProcessor
 
 from onecx_pipecat.adapters.agent_config import AgentConfigError
@@ -39,12 +40,17 @@ from onecx_pipecat.models import (
     ToolProposal,
     VoiceEntry,
 )
-from onecx_pipecat.pipeline.builder import build_voice_pipeline
+from onecx_pipecat.pipeline.builder import (
+    build_llm_context,
+    build_voice_pipeline,
+    set_system_prompt,
+)
 from onecx_pipecat.pipeline.prompt import compose_system_prompt
 from onecx_pipecat.pipeline.runner import DeferredCloseWebSocket, run_worker
 from onecx_pipecat.pipeline.tools import build_tools_schema
 from onecx_pipecat.protocol import (
     Command,
+    ContextUpdate,
     DegradedCapability,
     ErrorEvent,
     Event,
@@ -96,7 +102,8 @@ class VoiceSession:
         self._stt: FrameProcessor | None = None
         self._tts: FrameProcessor | None = None
         self._tools: ToolsSchema | None = None
-        self._system_prompt = ""
+        self._ai_context: list[str] = []
+        self._llm_context: LLMContext | None = None
         self._history: list[dict[str, str]] = []
         self._worker: PipelineWorker | None = None
         self._ended = False
@@ -135,12 +142,29 @@ class VoiceSession:
                     command.chat_id,
                     command.apm_principal_token,
                     command.authorization,
+                    command.ai_context,
                 )
             case RefreshToken():
                 return await self._refresh(command.apm_principal_token, command.authorization)
             case StopSession():
                 return await self._stop()
+            case ContextUpdate():
+                return self._update_ai_context(command.ai_context)
         return [ErrorEvent(code="unknown_command", message="unsupported command")]
+
+    def _update_ai_context(self, ai_context: list[str]) -> list[Event]:
+        """Replace the page context; the LLM sees it from the next turn on."""
+        if self.state is not SessionState.READY or self._snapshot is None:
+            return [ErrorEvent(code="illegal_state", message="session is not active")]
+        self._ai_context = list(ai_context)
+        if self._llm_context is not None:
+            set_system_prompt(self._llm_context, self._current_system_prompt())
+        return []
+
+    def _current_system_prompt(self) -> str:
+        if self._snapshot is None:
+            return ""
+        return compose_system_prompt(self._snapshot, self._ai_context)
 
     def check_expiry(self) -> list[Event]:
         """End a READY session whose tokens have expired; no-op otherwise."""
@@ -188,16 +212,17 @@ class VoiceSession:
         if self._llm is None or self._stt is None or self._tts is None or self._tools is None:
             raise RuntimeError("session is not started")
         if not self._ended:
+            self._llm_context = build_llm_context(
+                self._current_system_prompt(), self._history, self._tools
+            )
             self._worker = build_voice_pipeline(
                 websocket=DeferredCloseWebSocket(websocket),
                 session_id=self.session_id,
                 settings=self._container.settings,
-                system_prompt=self._system_prompt,
-                tools=self._tools,
+                context=self._llm_context,
                 llm=self._llm,
                 stt=self._stt,
                 tts=self._tts,
-                history=self._history,
                 save_entry=self._save_entry,
                 dispatch=self.dispatch,
                 fatal_context_failure=self._fatal_context_failure,
@@ -269,6 +294,8 @@ class VoiceSession:
         self._snapshot = None
         self._chat = None
         self._history = []
+        self._ai_context = []
+        self._llm_context = None
         self._allowed_tools = []
         self._llm = self._stt = self._tts = self._tools = None
 
@@ -284,9 +311,11 @@ class VoiceSession:
         chat_id: str,
         apm_principal_token: str,
         authorization: str,
+        ai_context: list[str],
     ) -> list[Event]:
         if self.state is not SessionState.CREATED:
             return [ErrorEvent(code="illegal_state", message="session already started")]
+        self._ai_context = list(ai_context)
 
         # 1. Authenticate the token carried by the message (never the URL).
         try:
@@ -351,7 +380,6 @@ class VoiceSession:
         self._allowed_tools = allowed_tools(snapshot, discovery.tools)
         self._llm, self._stt, self._tts = llm, stt, tts
         self._tools = build_tools_schema(llm, self, snapshot, self._allowed_tools)
-        self._system_prompt = compose_system_prompt(snapshot)
 
         self.state = SessionState.READY
         events: list[Event] = [
