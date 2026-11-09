@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Bake NLTK's punkt_tab sentence-tokenizer data into the image so pipecat does
 # not need to download it at runtime (the runtime user cannot write to it).
-RUN /app/.venv/bin/python -m nltk.downloader -d /app/nltk_data punkt_tab
+RUN /app/.venv/bin/python -c "import nltk; nltk.download('punkt_tab', download_dir='/app/nltk_data')"
 
 FROM python:3.12-slim-bookworm AS runtime
 
