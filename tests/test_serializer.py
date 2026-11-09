@@ -46,7 +46,12 @@ async def test_turn_boundaries_become_proposed_user_turn_frames(serializer):
 
 
 @pytest.mark.parametrize(
-    "payload", [{"type": "stop"}, {"type": "refresh_token", "apm_principal_token": "t"}]
+    "payload",
+    [
+        {"type": "stop"},
+        {"type": "refresh_token", "apm_principal_token": "t"},
+        {"type": "context_update", "ai_context": ["page"]},
+    ],
 )
 async def test_control_commands_become_transport_messages(serializer, payload):
     frame = await serializer.deserialize(json.dumps(payload))

@@ -113,7 +113,7 @@ class OnecxFrameSerializer(FrameSerializer):
                 return ProposedUserStartedSpeakingFrame()
             case "user_stopped_speaking":
                 return ProposedUserStoppedSpeakingFrame()
-            case "refresh_token" | "stop":
+            case "refresh_token" | "stop" | "context_update":
                 return InputTransportMessageFrame(message=payload)
         return _bad_command()
 

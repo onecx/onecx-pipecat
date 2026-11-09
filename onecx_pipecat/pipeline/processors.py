@@ -21,6 +21,7 @@ from onecx_pipecat.pipeline.captions import CaptionMessageFrame
 from onecx_pipecat.pipeline.serializer import BAD_COMMAND, wire_event
 from onecx_pipecat.protocol import (
     Command,
+    ContextUpdate,
     ErrorEvent,
     Event,
     RefreshToken,
@@ -32,7 +33,7 @@ Emit = Callable[[Event], Awaitable[None]]
 
 
 class SessionControl(FrameProcessor):
-    """Handles ``refresh_token`` / ``stop`` and malformed commands from the client."""
+    """Handles ``refresh_token`` / ``stop`` / ``context_update`` and malformed commands."""
 
     def __init__(
         self, dispatch: Callable[[Command], Awaitable[list[Event]]], emit: Emit, **kwargs
@@ -48,7 +49,7 @@ class SessionControl(FrameProcessor):
             return
         message = frame.message if isinstance(frame.message, dict) else BAD_COMMAND
         command = decode_command(message)
-        if not isinstance(command, RefreshToken | StopSession):
+        if not isinstance(command, RefreshToken | StopSession | ContextUpdate):
             await self._emit(ErrorEvent(code="bad_command", message="malformed command"))
         elif isinstance(command, StopSession):
             await self._dispatch(command)
