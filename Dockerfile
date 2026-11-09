@@ -18,12 +18,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --frozen --no-dev --no-install-project
 
+# Bake NLTK's punkt_tab sentence-tokenizer data into the image so pipecat does
+# not need to download it at runtime (the runtime user cannot write to it).
+RUN /app/.venv/bin/python -m nltk.downloader -d /app/nltk_data punkt_tab
+
 FROM python:3.12-slim-bookworm AS runtime
 
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    ONECX_HOST=0.0.0.0
+    ONECX_HOST=0.0.0.0 \
+    NLTK_DATA=/app/nltk_data
 
 RUN groupadd --system --gid 1001 app \
     && useradd --system --uid 1001 --gid app --no-create-home --shell /usr/sbin/nologin app
@@ -31,6 +36,7 @@ RUN groupadd --system --gid 1001 app \
 WORKDIR /app
 
 COPY --from=builder --chown=1001:1001 /app/.venv /app/.venv
+COPY --from=builder /app/nltk_data /app/nltk_data
 COPY --chown=1001:1001 onecx_pipecat/ /app/onecx_pipecat/
 
 USER 1001
