@@ -93,6 +93,7 @@ class HttpChatPersistence:
         else:
             raise PersistenceError(f"entry kind {entry.kind.value} is not persisted to the chat")
         body["skipAIProcessing"] = True
+        body["agentConfigVersion"] = entry.agent_config_version
         response = await self._request("POST", chat_id, apm_principal_token, json=body)
         if not response.is_success:
             raise PersistenceError(f"chat service error: {response.status_code}")

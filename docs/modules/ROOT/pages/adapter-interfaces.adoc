@@ -48,14 +48,23 @@ and a token with no `kid` falls back to the first key in the set.
 == Agent Configuration
 
 * Protocol: `AgentConfigAdapter.pin(tenant_id, agent_id,
-  apm_principal_token) -> AgentConfigSnapshot`
+  apm_principal_token, agent_config_version=None) -> AgentConfigSnapshot`
 * Implementation: `HttpAgentConfigAdapter`
 
 The snapshot is pinned **once**, when the session starts, and is not re-read
 for the lifetime of the session. `HttpAgentConfigAdapter` calls
 onecx-ai-provider-svc
 `GET {agent_config.base_url}/v1/agents/{id}/configuration` with the
-`apm-principal-token` header and parses the `AgentConfiguration` payload:
+`apm-principal-token` header when no version reference is supplied. An explicit
+`agent_config_version` id instead uses
+`GET {agent_config.base_url}/internal/agents/{id}/configuration/versions/{versionId}`.
+Both calls carry Pipecat's service authentication. The pinned version id is
+read from the response's `Content-Location` version resource, not from
+`schemaVersion` (which identifies the payload schema). Missing or malformed
+version metadata, a different agent, or a version that does not match the
+reference fails closed; there is no fallback to the active version.
+
+The adapter parses the `AgentConfiguration` payload:
 `schemaVersion`, `agent.id`, optional `agent.additionalPrompt`,
 `scaffold.systemPrompt`, and `mcpServers[]` (`name`, `url`, `credentialRef`,
 `unlistedToolPermission`, `toolRules[]`). The additional prompt defaults to an
@@ -106,7 +115,9 @@ user's propagated `apm-principal-token`; failures raise `PersistenceError`.
 * `append` sends `POST /internal/chats/{id}/messages` with `skipAIProcessing`
 (so chat-svc stores the message without forwarding it to the AI service):
 `HUMAN` becomes `{type: HUMAN, userId, text}`, `ASSISTANT` becomes
-`{type: ASSISTANT, text}`. The `Message` schema has no status, so an
+`{type: ASSISTANT, text}`. Both include `agentConfigVersion`, stamped from
+the session's pinned version id at the shared save boundary. The `Message`
+schema has no status, so an
 `INTERRUPTED` assistant entry is stored from `assistant_text` segments written
 to the WebSocket, spoken or not, including the text-only fallback for a handled
 TTS failure. A successful write is not a browser-render acknowledgement.

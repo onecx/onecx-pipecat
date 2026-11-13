@@ -34,6 +34,8 @@ class StartSession(BaseModel):
     user's browser presents (the latter is the ``Authorization`` header value).
     ``ai_context`` is the page context (JSON strings, as in the text chat's
     ``requestContext.aiContext``) that applies at the start of the session.
+    ``agent_config_version`` selects an exact saved version id; omission or
+    null selects the agent's active version.
     """
 
     type: Literal["start_session"] = "start_session"
@@ -42,6 +44,7 @@ class StartSession(BaseModel):
     apm_principal_token: str
     authorization: str = ""
     ai_context: list[str] = []
+    agent_config_version: str | None = None
 
 
 class ContextUpdate(BaseModel):
@@ -73,6 +76,7 @@ class SessionReady(BaseModel):
     session_id: str
     agent_id: str
     schema_version: str
+    agent_config_version: str
     protocol_version: int = PROTOCOL_VERSION
 
 
@@ -200,6 +204,7 @@ def decode_command(raw: dict) -> Command | None:
             chat_id = raw.get("chat_id")
             apm_principal_token = _principal_token(raw)
             ai_context = _ai_context(raw)
+            agent_config_version = raw.get("agent_config_version")
             if (
                 not isinstance(agent_id, str)
                 or not agent_id
@@ -207,6 +212,7 @@ def decode_command(raw: dict) -> Command | None:
                 or not chat_id
                 or apm_principal_token is None
                 or ai_context is None
+                or (agent_config_version is not None and not isinstance(agent_config_version, str))
             ):
                 return None
             return StartSession(
@@ -215,6 +221,7 @@ def decode_command(raw: dict) -> Command | None:
                 apm_principal_token=apm_principal_token,
                 authorization=_optional_str(raw, "authorization"),
                 ai_context=ai_context,
+                agent_config_version=agent_config_version,
             )
         case "context_update":
             ai_context = _ai_context(raw)

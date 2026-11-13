@@ -27,7 +27,7 @@ async def test_saves_a_human_entry_as_a_user_message():
 
     entry_id = await _persistence(handler).append(
         "c 1",
-        VoiceEntry(kind=VoiceEntryKind.HUMAN, text="hello"),
+        VoiceEntry(kind=VoiceEntryKind.HUMAN, text="hello", agent_config_version="config-v2"),
         apm_principal_token="tok",
         user_id="user-1",
     )
@@ -40,6 +40,7 @@ async def test_saves_a_human_entry_as_a_user_message():
         "text": "hello",
         "userId": "user-1",
         "skipAIProcessing": True,
+        "agentConfigVersion": "config-v2",
     }
 
 
@@ -51,10 +52,18 @@ async def test_saves_an_interrupted_assistant_entry_as_the_spoken_text():
         return httpx.Response(201, json={"id": "m-2", "type": "ASSISTANT"})
 
     entry = VoiceEntry(
-        kind=VoiceEntryKind.ASSISTANT, text="Sentence 1.", status=VoiceEntryStatus.INTERRUPTED
+        kind=VoiceEntryKind.ASSISTANT,
+        text="Sentence 1.",
+        status=VoiceEntryStatus.INTERRUPTED,
+        agent_config_version="config-v1",
     )
     assert await _persistence(handler).append("c", entry) == "m-2"
-    assert seen["body"] == {"type": "ASSISTANT", "text": "Sentence 1.", "skipAIProcessing": True}
+    assert seen["body"] == {
+        "type": "ASSISTANT",
+        "text": "Sentence 1.",
+        "skipAIProcessing": True,
+        "agentConfigVersion": "config-v1",
+    }
 
 
 async def test_requests_carry_the_service_auth():

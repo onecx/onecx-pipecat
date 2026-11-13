@@ -96,6 +96,7 @@ class AgentConfigSnapshot(BaseModel):
 
     agent_id: str
     schema_version: str
+    agent_config_version: str = ""
     system_prompt: str = ""
     additional_prompt: str = ""
     mcp_servers: list[McpServerSnapshot] = Field(default_factory=list)
@@ -149,8 +150,7 @@ class VoiceEntry(BaseModel):
     idempotency_key: str | None = None
     # Terminal state the entry was finalized in (see ``VoiceEntryStatus``).
     status: VoiceEntryStatus = VoiceEntryStatus.COMPLETED
-    # The agent configuration version this entry was produced under; left empty
-    # for now — populating it from the pinned snapshot is tracked in #938.
+    # Stamped by the session from its pinned snapshot before persistence.
     agent_config_version: str = ""
 
 

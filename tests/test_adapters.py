@@ -375,15 +375,22 @@ _AGENT_CONFIGURATION = {
 }
 
 
-async def _pin(status: int, body: dict | None = None, seen: list | None = None):
+async def _pin(
+    status: int,
+    body: dict | None = None,
+    seen: list | None = None,
+    *,
+    version: str | None = None,
+    location: str = "/internal/agents/agent-1/configuration/versions/config-v1",
+):
     def handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(request)
-        return httpx.Response(status, json=body)
+        return httpx.Response(status, json=body, headers={"Content-Location": location})
 
     adapter = HttpAgentConfigAdapter(AgentConfigSettings(base_url="http://ai"))
     adapter.set_client(_client(handler))
-    return await adapter.pin("local", "agent-1", "tok")
+    return await adapter.pin("local", "agent-1", "tok", version)
 
 
 async def test_agent_config_parses_ai_provider_configuration():
@@ -395,6 +402,7 @@ async def test_agent_config_parses_ai_provider_configuration():
     assert seen[0].headers["apm-principal-token"] == "tok"
     assert snap.agent_id == "agent-1"
     assert snap.schema_version == "1"
+    assert snap.agent_config_version == "config-v1"
     assert snap.system_prompt == "be brief"
     assert snap.additional_prompt == "  Ask for tenant first.  "
     assert snap.agent_name == "Helper"
@@ -431,10 +439,80 @@ async def test_agent_config_without_voice_enabled_fails_closed(voice):
         await _pin(200, body)
 
 
-@pytest.mark.parametrize("status", [404, 409, 500])
-async def test_agent_config_error_status_fails(status):
+@pytest.mark.parametrize("status", [400, 404, 409, 500])
+@pytest.mark.parametrize("version", [None, "config-v1"])
+async def test_agent_config_error_status_fails(status, version):
     with pytest.raises(AgentConfigError):
-        await _pin(status, {})
+        await _pin(status, {}, version=version)
+
+
+async def test_agent_config_pins_exact_version_with_service_and_user_auth():
+    seen: list[httpx.Request] = []
+
+    class Bearer(httpx.Auth):
+        def auth_flow(self, request):
+            request.headers["Authorization"] = "Bearer svc"
+            yield request
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json=_AGENT_CONFIGURATION,
+            headers={
+                "Content-Location": "http://ai/internal/agents/agent-1/"
+                "configuration/versions/old%2Fversion%3F"
+            },
+        )
+
+    adapter = HttpAgentConfigAdapter(AgentConfigSettings(base_url="http://ai"), Bearer())
+    adapter.set_client(_client(handler))
+    snap = await adapter.pin("local", "agent-1", "tok", "old/version?")
+    assert snap.agent_config_version == "old/version?"
+    assert len(seen) == 1
+    assert (
+        seen[0].url.raw_path == b"/internal/agents/agent-1/configuration/versions/old%2Fversion%3F"
+    )
+    assert seen[0].headers["apm-principal-token"] == "tok"
+    assert seen[0].headers["Authorization"] == "Bearer svc"
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "",
+        "/v1/agents/agent-1/configuration",
+        "/internal/agents/other/configuration/versions/config-v1",
+        "/internal/agents/agent-1/configuration/versions/",
+        "/internal/agents/agent-1/configuration/versions/config-v1?x=1",
+        "http://[invalid",
+    ],
+)
+@pytest.mark.parametrize("version", [None, "config-v1"])
+async def test_agent_config_requires_an_identifiable_pinned_version(location, version):
+    with pytest.raises(AgentConfigError):
+        await _pin(200, _AGENT_CONFIGURATION, location=location, version=version)
+
+
+@pytest.mark.parametrize("version", ["", "   "])
+async def test_agent_config_rejects_empty_reference_before_lookup(version):
+    seen = []
+    with pytest.raises(AgentConfigError):
+        await _pin(200, _AGENT_CONFIGURATION, seen, version=version)
+    assert seen == []
+
+
+async def test_agent_config_never_falls_back_to_a_different_version():
+    seen = []
+    with pytest.raises(AgentConfigError):
+        await _pin(200, _AGENT_CONFIGURATION, seen, version="missing")
+    assert len(seen) == 1
+    assert seen[0].url.path == "/internal/agents/agent-1/configuration/versions/missing"
+
+
+async def test_agent_config_rejects_a_configuration_from_another_agent():
+    with pytest.raises(AgentConfigError):
+        await _pin(200, {**_AGENT_CONFIGURATION, "agent": {"id": "other"}})
 
 
 @pytest.mark.parametrize(
@@ -499,7 +577,14 @@ async def test_agent_id_is_escaped_in_the_url_path():
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200, json=_AGENT_CONFIGURATION)
+        return httpx.Response(
+            200,
+            json={**_AGENT_CONFIGURATION, "agent": {"id": "a/b?c#d"}},
+            headers={
+                "Content-Location": "/internal/agents/a%2Fb%3Fc%23d/"
+                "configuration/versions/config-v1"
+            },
+        )
 
     adapter = HttpAgentConfigAdapter(AgentConfigSettings(base_url="http://ai"))
     adapter.set_client(_client(handler))

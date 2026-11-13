@@ -1,3 +1,5 @@
+import pytest
+
 from onecx_pipecat.protocol import (
     MAX_AI_CONTEXT_ENTRIES,
     MAX_AI_CONTEXT_ENTRY_CHARS,
@@ -23,6 +25,19 @@ def test_start_session_without_ai_context_defaults_to_empty():
     command = decode_command(_START)
     assert isinstance(command, StartSession)
     assert command.ai_context == []
+    assert command.agent_config_version is None
+
+
+@pytest.mark.parametrize("version", [None, "config-v2", ""])
+def test_start_session_preserves_version_reference(version):
+    command = decode_command({**_START, "agent_config_version": version})
+    assert isinstance(command, StartSession)
+    assert command.agent_config_version == version
+
+
+@pytest.mark.parametrize("version", [3, True, {}, []])
+def test_start_session_rejects_malformed_version_reference(version):
+    assert decode_command({**_START, "agent_config_version": version}) is None
 
 
 def test_start_session_carries_ai_context():

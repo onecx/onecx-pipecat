@@ -2,6 +2,8 @@
 
 Session start fetches ai-provider ``GET /v1/agents/{id}/configuration`` and
 pins the payload for the whole session; changes apply to the next session.
+An explicit version uses ``GET /internal/agents/{id}/configuration/versions/{versionId}``.
+Both responses identify the pinned version in ``Content-Location``.
 ``pin`` fails (``AgentConfigError``) when the agent is missing (``404``),
 invalid (``409``), unreachable, or ``voice.voiceEnabled`` is not true — a
 voice session must not start without a usable configuration.
@@ -10,7 +12,7 @@ voice session must not start without a usable configuration.
 from __future__ import annotations
 
 from typing import Any, Protocol
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -36,7 +38,11 @@ class AgentConfigAdapter(Protocol):
     """Replaceable agent-configuration boundary."""
 
     async def pin(
-        self, tenant_id: str, agent_id: str, apm_principal_token: str
+        self,
+        tenant_id: str,
+        agent_id: str,
+        apm_principal_token: str,
+        agent_config_version: str | None = None,
     ) -> AgentConfigSnapshot: ...
 
 
@@ -63,14 +69,27 @@ class HttpAgentConfigAdapter:
         self._client = client
 
     async def pin(
-        self, tenant_id: str, agent_id: str, apm_principal_token: str
+        self,
+        tenant_id: str,
+        agent_id: str,
+        apm_principal_token: str,
+        agent_config_version: str | None = None,
     ) -> AgentConfigSnapshot:
+        if agent_config_version is not None and not agent_config_version.strip():
+            raise AgentConfigError("configuration version reference must not be empty")
+        escaped_agent = quote(agent_id, safe="")
+        path = f"/v1/agents/{escaped_agent}/configuration"
+        if agent_config_version is not None:
+            path = (
+                f"/internal/agents/{escaped_agent}/configuration/versions/"
+                f"{quote(agent_config_version, safe='')}"
+            )
         client = self._client or httpx.AsyncClient()
         headers = {"apm-principal-token": apm_principal_token}
         try:
             try:
                 response = await client.get(
-                    f"{self._settings.base_url}/v1/agents/{quote(agent_id, safe='')}/configuration",
+                    f"{self._settings.base_url}{path}",
                     headers=headers,
                     auth=self._service_auth,
                 )
@@ -88,10 +107,39 @@ class HttpAgentConfigAdapter:
                 raise AgentConfigError(
                     f"agent configuration for agent={agent_id} is not valid JSON"
                 ) from exc
-            return _parse_configuration(body, agent_id)
+            snapshot = _parse_configuration(body, agent_id)
+            if snapshot.agent_id != agent_id:
+                raise AgentConfigError(f"configuration belongs to another agent, not {agent_id}")
+            version_id = _configuration_version(response, agent_id)
+            if agent_config_version is not None and version_id != agent_config_version:
+                raise AgentConfigError(
+                    "configuration version does not match the requested reference"
+                )
+            snapshot.agent_config_version = version_id
+            return snapshot
         finally:
             if client is not self._client:
                 await client.aclose()
+
+
+def _configuration_version(response: httpx.Response, agent_id: str) -> str:
+    """Read the immutable id from the provider's version resource location."""
+    try:
+        location = urlsplit(response.headers.get("content-location", ""))
+    except ValueError as exc:
+        raise AgentConfigError("invalid configuration version Content-Location") from exc
+    parts = location.path.split("/")
+    if (
+        len(parts) != 7
+        or parts[:3] != ["", "internal", "agents"]
+        or unquote(parts[3]) != agent_id
+        or parts[4:6] != ["configuration", "versions"]
+        or not unquote(parts[6]).strip()
+        or location.query
+        or location.fragment
+    ):
+        raise AgentConfigError("missing or invalid configuration version Content-Location")
+    return unquote(parts[6])
 
 
 def _section(body: dict[str, Any], key: str, agent_id: str) -> dict[str, Any]:

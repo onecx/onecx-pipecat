@@ -143,6 +143,7 @@ class VoiceSession:
                     command.apm_principal_token,
                     command.authorization,
                     command.ai_context,
+                    command.agent_config_version,
                 )
             case RefreshToken():
                 return await self._refresh(command.apm_principal_token, command.authorization)
@@ -249,14 +250,28 @@ class VoiceSession:
 
     async def _save_entry(self, entry: VoiceEntry) -> str:
         """Append to the anchored chat with the current (refreshable) user token."""
-        if self._chat is None or self._principal is None:
-            raise PersistenceError("session has no chat")
-        return await self._container.persistence.append(
+        if self._chat is None or self._principal is None or self._snapshot is None:
+            raise PersistenceError("session has no chat or pinned configuration")
+        entry = entry.model_copy(
+            update={"agent_config_version": self._snapshot.agent_config_version}
+        )
+        entry_id = await self._container.persistence.append(
             self._chat.chat_id,
             entry,
             apm_principal_token=self._apm_principal_token,
             user_id=self._principal.subject,
         )
+        logger.info(
+            "Voice conversation entry saved",
+            extra={
+                "session_id": self.session_id,
+                "agent_id": self._snapshot.agent_id,
+                "agent_config_version": self._snapshot.agent_config_version,
+                "entry_id": entry_id,
+                "entry_kind": entry.kind.value,
+            },
+        )
+        return entry_id
 
     async def end_pipeline(self, events: list[Event], close_code: int) -> None:
         """Stop the pipeline; ``events`` are sent after it, then the socket closes."""
@@ -312,6 +327,7 @@ class VoiceSession:
         apm_principal_token: str,
         authorization: str,
         ai_context: list[str],
+        agent_config_version: str | None = None,
     ) -> list[Event]:
         if self.state is not SessionState.CREATED:
             return [ErrorEvent(code="illegal_state", message="session already started")]
@@ -354,8 +370,17 @@ class VoiceSession:
         # 4. Pin the agent configuration for the whole session.
         try:
             snapshot = await self._container.agent_config.pin(
-                principal.tenant_id, agent_id, apm_principal_token
+                principal.tenant_id, agent_id, apm_principal_token, agent_config_version
             )
+            if (
+                not snapshot.agent_config_version.strip()
+                or snapshot.agent_id != agent_id
+                or (
+                    agent_config_version is not None
+                    and snapshot.agent_config_version != agent_config_version
+                )
+            ):
+                raise AgentConfigError("configuration version is missing or does not match")
         except AgentConfigError as exc:
             return self._fail_start("config_unavailable", str(exc))
         self._snapshot = snapshot
@@ -387,8 +412,17 @@ class VoiceSession:
                 session_id=self.session_id,
                 agent_id=snapshot.agent_id,
                 schema_version=snapshot.schema_version,
+                agent_config_version=snapshot.agent_config_version,
             )
         ]
+        logger.info(
+            "Voice session ready",
+            extra={
+                "session_id": self.session_id,
+                "agent_id": snapshot.agent_id,
+                "agent_config_version": snapshot.agent_config_version,
+            },
+        )
         # 8. Report each skipped MCP server; the session continues degraded.
         for server_name, reason in discovery.degraded:
             events.append(DegradedCapability(reason=f"{server_name}: {reason}"))

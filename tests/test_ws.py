@@ -94,19 +94,21 @@ def test_ws_voice_turn_streams_transcript_text_audio_and_completion():
         assert wait_for_close(ws)["code"] == 1000
 
 
-def test_ws_turn_is_persisted():
+@pytest.mark.parametrize("reference", [None, "config-v1"])
+def test_ws_turn_is_persisted_with_pinned_version(reference):
     container = _container()
     persistence = FakePersistence()
     container.persistence = persistence  # type: ignore[assignment]
     client = TestClient(create_app(container))
     with client.websocket_connect("/ws/voice") as ws:
-        ws.send_json(_start())
-        _receive_json_bounded(ws)
+        ws.send_json({**_start(), "agent_config_version": reference})
+        assert _receive_json_bounded(ws)["agent_config_version"] == "config-v1"
         _speak(ws)
         _until(ws, "turn_complete")
         end_session(ws)
     assert [e.kind.value for e in persistence.entries] == ["HUMAN", "ASSISTANT"]
     assert persistence.entries[0].text == "in-memory transcript"
+    assert all(entry.agent_config_version == "config-v1" for entry in persistence.entries)
 
 
 def test_ws_malformed_message_while_running_is_reported_and_session_continues():

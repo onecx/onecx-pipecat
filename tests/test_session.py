@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
@@ -11,6 +13,9 @@ from onecx_pipecat.models import (
     Principal,
     ProviderSnapshot,
     ToolRule,
+    VoiceEntry,
+    VoiceEntryKind,
+    VoiceEntryStatus,
 )
 from onecx_pipecat.pipeline.builder import build_llm_context
 from onecx_pipecat.protocol import ContextUpdate, RefreshToken, StartSession, StopSession
@@ -49,7 +54,75 @@ async def test_start_becomes_ready_with_pinned_configuration():
     assert session.state is SessionState.READY
     assert [e.kind for e in events] == ["session_ready"]
     assert events[0].schema_version == "1"
+    assert events[0].agent_config_version == "config-v1"
     assert session.snapshot is not None and session.snapshot.system_prompt == "be brief"
+
+
+@pytest.mark.parametrize("reference", [None, "config-v1"])
+async def test_version_is_pinned_in_ready_entries_and_structured_logs(reference, caplog):
+    container = _container()
+    container.agent_config.register(
+        AgentConfigSnapshot(
+            agent_id="onecx-agent",
+            schema_version="1",
+            agent_config_version="config-v2",
+            system_prompt="new prompt",
+        )
+    )
+    session = _session(container)
+    pinned = reference or "config-v2"
+    with caplog.at_level(logging.INFO, logger="onecx_pipecat.session"):
+        events = await session.dispatch(_start(agent_config_version=reference))
+        assert events[0].model_dump()["agent_config_version"] == pinned
+        assert session.snapshot is not None
+        assert session.snapshot.agent_config_version == pinned
+        assert session.snapshot.system_prompt == ("be brief" if reference else "new prompt")
+        container.agent_config.register(
+            AgentConfigSnapshot(
+                agent_id="onecx-agent", schema_version="1", agent_config_version="config-v3"
+            )
+        )
+        container.auth.seed("tok-new", subject="user-1", tenant_id="local")
+        await session.dispatch(RefreshToken(apm_principal_token="tok-new"))
+        await session.dispatch(ContextUpdate(ai_context=["new page"]))
+        for kind in (VoiceEntryKind.HUMAN, VoiceEntryKind.ASSISTANT):
+            await session._save_entry(
+                VoiceEntry(
+                    kind=kind,
+                    text="hi",
+                    status=VoiceEntryStatus.INTERRUPTED,
+                    agent_config_version="must-be-overridden",
+                )
+            )
+    assert [entry.agent_config_version for entry in container.persistence.entries] == [
+        pinned,
+        pinned,
+    ]
+    assert [record.agent_config_version for record in caplog.records] == [pinned] * 3
+    assert all(record.session_id == "sess-1" for record in caplog.records)
+    assert all(record.agent_id == "onecx-agent" for record in caplog.records)
+
+
+@pytest.mark.parametrize("reference", ["missing", "", "   "])
+async def test_start_with_missing_or_invalid_version_fails_closed(reference):
+    container = _container()
+    session = _session(container)
+    events = await session.dispatch(_start(agent_config_version=reference))
+    _assert_start_rejected(session, events, "config_unavailable")
+    assert container.mcp.calls == []
+    assert container.persistence.entries == []
+
+
+async def test_start_cannot_use_a_version_belonging_to_another_agent():
+    container = _container()
+    container.agent_config.register(
+        AgentConfigSnapshot(
+            agent_id="other-agent", schema_version="1", agent_config_version="other-version"
+        )
+    )
+    session = _session(container)
+    events = await session.dispatch(_start(agent_config_version="other-version"))
+    _assert_start_rejected(session, events, "config_unavailable")
 
 
 async def test_start_without_configuration_fails_closed():

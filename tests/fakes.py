@@ -76,11 +76,26 @@ class FakeChat:
 class FakeAgentConfig:
     def __init__(self) -> None:
         self._snapshots: dict[str, AgentConfigSnapshot] = {}
+        self._versions: dict[tuple[str, str], AgentConfigSnapshot] = {}
 
     def register(self, snapshot: AgentConfigSnapshot) -> None:
+        if not snapshot.agent_config_version:
+            snapshot = snapshot.model_copy(update={"agent_config_version": "config-v1"})
         self._snapshots[snapshot.agent_id] = snapshot
+        self._versions[(snapshot.agent_id, snapshot.agent_config_version)] = snapshot
 
-    async def pin(self, tenant_id: str, agent_id: str, apm_principal_token: str):
+    async def pin(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        apm_principal_token: str,
+        agent_config_version: str | None = None,
+    ):
+        if agent_config_version is not None:
+            snapshot = self._versions.get((agent_id, agent_config_version))
+            if snapshot is None:
+                raise AgentConfigError(f"no configuration version={agent_config_version}")
+            return snapshot
         if agent_id not in self._snapshots:
             raise AgentConfigError(f"no configuration for agent={agent_id}")
         return self._snapshots[agent_id]

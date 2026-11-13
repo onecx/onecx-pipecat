@@ -32,7 +32,8 @@ silently forgot the conversation would be wrong;
 . checks the user's existing voice permission with the `authorization` access
 token;
 . pins the agent configuration (provider, model, system prompt, skills, MCP
-servers) for the whole session;
+servers) for the whole session: an optional `agent_config_version` selects an
+exact saved version id; omission or null selects the agent's active version;
 . builds the LLM (provider credentials are resolved from
 `ONECX_CREDENTIALS__REFS`) and the speech services for the pinned language;
 . discovers MCP tools once and keeps only those that resolve to `ALWAYS_ALLOW`.
@@ -41,6 +42,15 @@ Every step fails closed: a typed `error` event, then `session_closed` (reason
 `start_failed`), then the connection closes with code `1008`. A failed start
 leaves no state behind and cannot be retried on the same connection. Before a
 valid `start_session`, malformed messages only produce `error{bad_command}`.
+
+An unknown, empty, invalid, or unavailable version reference fails start with
+`config_unavailable`, just like a missing configuration. It never falls back
+to the active version. The pinned version id is returned as
+`session_ready.agent_config_version`, saved on every conversation entry as
+`agentConfigVersion`, and included in structured ready and entry-save logs as
+`agent_config_version` alongside `session_id` and `agent_id`. The payload's
+`schema_version` remains separate. Active-version changes, context updates,
+and token refreshes do not change the running session's pinned version.
 
 The endpoint takes no query parameters. A connection that presents any query
 parameter (for example `?token=...`) is closed with code `1008` before it is
@@ -88,7 +98,7 @@ Messages are JSON objects with a `type` field.
 | `type` | Meaning
 
 | `start_session`
-| Handshake only. `agent_id`, `chat_id`, `apm_principal_token`, optional `authorization`, optional `ai_context` (list of strings, at most 20 entries of at most 8000 characters each; a malformed or over-limit list rejects the command).
+| Handshake only. `agent_id`, `chat_id`, `apm_principal_token`, optional `authorization`, optional `agent_config_version` (saved version id; omission or null selects the active version), optional `ai_context` (list of strings, at most 20 entries of at most 8000 characters each; a malformed or over-limit list rejects the command).
 
 | `context_update`
 | Replaces the page context (`ai_context`, same limits as `start_session`) used for the next LLM turn. Valid only after `session_ready`; the system prompt is rebuilt, so the change applies from the next user turn.
@@ -118,7 +128,7 @@ Anything else (invalid JSON, unknown `type`, invalid base64) is answered with
 |===
 | `kind` | Meaning
 
-| `session_ready` | Handshake done; carries `session_id`, `agent_id`, `schema_version`, `protocol_version`.
+| `session_ready` | Handshake done; carries `session_id`, `agent_id`, `agent_config_version` (pinned version id), `schema_version`, `protocol_version`.
 | `degraded_capability` | An MCP server was unreachable at discovery; its tools are missing.
 | `transcript` | `text` and `state` (`PARTIAL` interim, `FINAL`). Only the final text becomes a durable entry.
 | `user_started_speaking` / `user_stopped_speaking` | A user turn started (while the assistant speaks: a barge-in) or ended. Sent in both turn-detection modes.
