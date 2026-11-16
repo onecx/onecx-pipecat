@@ -173,10 +173,16 @@ configuration and tool set for that turn and emits a `degraded_capability` event
 with reason `configuration refresh failed, previous kept: <error>`. The session does not
 close. The next turn retries the refresh.
 
-NOTE: Only the system prompt, skills, MCP tool set and tool schema are re-pinned
-per turn. The LLM provider and model, and the STT and TTS services, are built
-into the pipeline at start and stay fixed for the session. Changing them requires
-a new session.
+NOTE: The system prompt, skills, MCP tool set and tool schema are re-pinned per
+turn. The LLM model and the pinned language are also applied in place at the turn
+boundary: a changed model updates the running LLM, and a changed language that has
+a speech profile updates the running STT and TTS services. A language without a
+profile keeps the previous language and emits `degraded_capability` with reason
+`language change not applied: <error>`; a failed model update is reported the same
+way as `model change not applied: <error>`. A changed LLM provider cannot be swapped
+inside a running pipeline. The session keeps the old provider, emits
+`degraded_capability` with reason `LLM provider change applies from the next
+session`, and uses the new provider from the next session.
 
 == Turns, barge-in and persistence
 

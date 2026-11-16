@@ -23,6 +23,11 @@ from uuid import uuid4
 
 from fastapi import WebSocket
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.frames.frames import (
+    LLMUpdateSettingsFrame,
+    STTUpdateSettingsFrame,
+    TTSUpdateSettingsFrame,
+)
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameProcessor
@@ -34,6 +39,7 @@ from onecx_pipecat.adapters.chat import Chat, ChatAccessError
 from onecx_pipecat.adapters.mcp import McpToolResult, propagated_headers, tool_set_hash
 from onecx_pipecat.adapters.permission import allowed_tools, required_permission_apps
 from onecx_pipecat.adapters.persistence import PersistenceError
+from onecx_pipecat.config import AwsSpeechProfile
 from onecx_pipecat.container import AppContainer
 from onecx_pipecat.models import (
     AgentConfigSnapshot,
@@ -63,16 +69,40 @@ from onecx_pipecat.protocol import (
     StopSession,
 )
 from onecx_pipecat.services.credentials import CredentialError
-from onecx_pipecat.services.llm import LlmConfigError, build_llm
+from onecx_pipecat.services.llm import LlmConfigError, build_llm, parse_model_params
 from onecx_pipecat.services.speech import (
     UnsupportedLanguageError,
     build_stt_service,
     build_tts_service,
     build_vad_analyzer,
+    resolve_profile,
 )
 
 _NORMAL_CLOSURE = 1000
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _RunningServices:
+    """Provider, model and language the running LLM/STT/TTS services were last set up with."""
+
+    provider: tuple[str, str, str, str] | None
+    model: tuple[str, str] | None
+    language_code: str
+
+
+def _provider_key(snapshot: AgentConfigSnapshot) -> tuple[str, str, str, str] | None:
+    provider = snapshot.provider
+    if provider is None:
+        return None
+    return (provider.type, provider.llm_url, provider.auth_mode, provider.credential_ref)
+
+
+def _model_key(snapshot: AgentConfigSnapshot) -> tuple[str, str] | None:
+    model = snapshot.model
+    if model is None:
+        return None
+    return (model.model_identifier, model.model_params)
 
 
 class SessionState(StrEnum):
@@ -127,6 +157,7 @@ class VoiceSession:
         self._llm: FrameProcessor | None = None
         self._stt: FrameProcessor | None = None
         self._tts: FrameProcessor | None = None
+        self._running: _RunningServices | None = None
         self._tools: ToolsSchema | None = None
         self._ai_context: list[str] = []
         self._llm_context: LLMContext | None = None
@@ -410,6 +441,9 @@ class VoiceSession:
         # 6-7. Discover and gate the tool set for the first turn.
         pinned = await self._pin_tools(principal, snapshot, apm_principal_token, authorization)
         self._llm, self._stt, self._tts = llm, stt, tts
+        self._running = _RunningServices(
+            _provider_key(snapshot), _model_key(snapshot), snapshot.language_code
+        )
         self._apply_turn_pin(pinned, llm)
         self._turn_index = 1
         self._turn_pin = TurnPin(self._turn_index, pinned.tool_set_hash)
@@ -502,6 +536,7 @@ class VoiceSession:
             return events
 
         self._snapshot = snapshot
+        events.extend(await self._apply_in_place_settings(snapshot))
         pinned = await self._pin_tools(
             self._principal, snapshot, self._apm_principal_token, self._authorization
         )
@@ -518,6 +553,62 @@ class VoiceSession:
         for server_name, reason in pinned.degraded:
             events.append(DegradedCapability(reason=f"{server_name}: {reason}"))
         return events
+
+    async def _apply_in_place_settings(self, snapshot: AgentConfigSnapshot) -> list[Event]:
+        """Push a changed model or language into the running services at a turn boundary.
+
+        A changed LLM provider needs a new service instance, which the running
+        pipeline cannot take over, so it keeps the provider it started with and
+        reports ``degraded_capability`` until the next session. A failed update
+        keeps the previously applied value.
+        """
+        running = self._running
+        if running is None or self._worker is None:
+            return []
+        events: list[Event] = []
+        if _provider_key(snapshot) != running.provider:
+            events.append(
+                DegradedCapability(reason="LLM provider change applies from the next session")
+            )
+
+        model, language_code = running.model, running.language_code
+        model_key = _model_key(snapshot)
+        if model_key != running.model and snapshot.model is not None:
+            try:
+                settings_cls = getattr(type(self._llm), "Settings", None)
+                if settings_cls is not None:
+                    params = parse_model_params(snapshot.model.model_params)
+                    delta = settings_cls(model=snapshot.model.model_identifier, **params)
+                    await self._worker.queue_frame(LLMUpdateSettingsFrame(delta=delta))
+                model = model_key
+            except (LlmConfigError, TypeError) as exc:
+                events.append(DegradedCapability(reason=f"model change not applied: {exc}"))
+
+        if snapshot.language_code != running.language_code:
+            try:
+                profile = resolve_profile(self._container.settings.speech, snapshot.language_code)
+            except UnsupportedLanguageError as exc:
+                events.append(DegradedCapability(reason=f"language change not applied: {exc}"))
+            else:
+                await self._update_speech_language(profile)
+                language_code = snapshot.language_code
+
+        self._running = _RunningServices(running.provider, model, language_code)
+        return events
+
+    async def _update_speech_language(self, profile: AwsSpeechProfile) -> None:
+        stt_cls = getattr(type(self._stt), "Settings", None)
+        if stt_cls is not None:
+            await self._worker.queue_frame(
+                STTUpdateSettingsFrame(delta=stt_cls(language=profile.transcribe_language))
+            )
+        tts_cls = getattr(type(self._tts), "Settings", None)
+        if tts_cls is not None:
+            await self._worker.queue_frame(
+                TTSUpdateSettingsFrame(
+                    delta=tts_cls(voice=profile.polly_voice, language=profile.transcribe_language)
+                )
+            )
 
     async def _refresh(self, apm_principal_token: str, authorization: str) -> list[Event]:
         """Replace the session tokens; fail closed if the new token is invalid."""

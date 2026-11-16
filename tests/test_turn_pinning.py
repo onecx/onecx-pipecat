@@ -4,6 +4,11 @@ import asyncio
 
 import httpx
 import pytest
+from pipecat.frames.frames import (
+    LLMUpdateSettingsFrame,
+    STTUpdateSettingsFrame,
+    TTSUpdateSettingsFrame,
+)
 
 from onecx_pipecat.adapters.agent_config import AgentConfigError, HttpAgentConfigAdapter
 from onecx_pipecat.adapters.mcp import tool_set_hash
@@ -12,13 +17,15 @@ from onecx_pipecat.adapters.permission import (
     parse_required_permission,
     required_permission_apps,
 )
-from onecx_pipecat.config import AgentConfigSettings
+from onecx_pipecat.config import AgentConfigSettings, AwsSpeechProfile
 from onecx_pipecat.models import (
     AgentConfigSnapshot,
     AgentToolSnapshot,
     McpServerSnapshot,
+    ModelSnapshot,
     PermissionAction,
     Principal,
+    ProviderSnapshot,
 )
 from onecx_pipecat.protocol import DegradedCapability, StartSession
 from onecx_pipecat.session import SessionState, VoiceSession
@@ -293,3 +300,101 @@ async def test_begin_turn_is_a_noop_when_not_ready():
     session = VoiceSession("sess-1", _session_container())
     assert await session.begin_turn() == []
     assert session.turn_pin is None
+
+
+# --- session: in-place model and language updates at the turn boundary ------
+
+
+class _RecordingWorker:
+    def __init__(self) -> None:
+        self.frames: list = []
+
+    async def queue_frame(self, frame) -> None:
+        self.frames.append(frame)
+
+
+class _SettingsService:
+    """Stands in for a Pipecat service that exposes a ``Settings`` delta class."""
+
+    class Settings:
+        def __init__(self, **fields) -> None:
+            self.fields = fields
+
+    def register_function(self, name, handler) -> None:
+        pass
+
+    def unregister_function(self, name) -> None:
+        pass
+
+
+def _snapshot_with(
+    *, provider: str = "OPENAI", model: str = "gpt-a", language: str = ""
+) -> AgentConfigSnapshot:
+    snapshot = _snapshot()
+    snapshot.provider = ProviderSnapshot(type=provider, credential_ref="cred")
+    snapshot.model = ModelSnapshot(model_identifier=model)
+    snapshot.language_code = language
+    return snapshot
+
+
+async def _started_with_services(snapshot: AgentConfigSnapshot):
+    container = _session_container()
+    container.agent_config.register(snapshot)
+    container.settings.speech.aws_profiles["pl"] = AwsSpeechProfile(
+        transcribe_language="pl-PL", polly_voice="Ewa"
+    )
+    session = await _started(container)
+    session._llm, session._stt, session._tts = (
+        _SettingsService(),
+        _SettingsService(),
+        _SettingsService(),
+    )
+    session._worker = _RecordingWorker()
+    return container, session
+
+
+async def test_model_change_is_pushed_into_the_running_llm_at_the_turn_boundary():
+    container, session = await _started_with_services(_snapshot_with(model="gpt-a"))
+    container.agent_config.register(_snapshot_with(model="gpt-b"))
+
+    assert await session.begin_turn() == []
+
+    [frame] = session._worker.frames
+    assert isinstance(frame, LLMUpdateSettingsFrame)
+    assert frame.delta.fields == {"model": "gpt-b"}
+
+
+async def test_provider_change_keeps_the_running_provider_and_reports_degraded():
+    container, session = await _started_with_services(_snapshot_with(provider="OPENAI"))
+    container.agent_config.register(_snapshot_with(provider="ANTHROPIC"))
+
+    events = await session.begin_turn()
+
+    assert session._worker.frames == []
+    assert [type(e) for e in events] == [DegradedCapability]
+    assert "next session" in events[0].reason
+
+
+async def test_language_change_updates_stt_and_tts_when_the_profile_exists():
+    container, session = await _started_with_services(_snapshot_with(language="en"))
+    container.agent_config.register(_snapshot_with(language="pl"))
+
+    assert await session.begin_turn() == []
+
+    stt, tts = session._worker.frames
+    assert isinstance(stt, STTUpdateSettingsFrame)
+    assert stt.delta.fields == {"language": "pl-PL"}
+    assert isinstance(tts, TTSUpdateSettingsFrame)
+    assert tts.delta.fields == {"voice": "Ewa", "language": "pl-PL"}
+
+
+async def test_unsupported_language_keeps_the_previous_language():
+    container, session = await _started_with_services(_snapshot_with(language="en"))
+    container.agent_config.register(_snapshot_with(language="xx"))
+
+    events = await session.begin_turn()
+
+    assert session._worker.frames == []
+    assert [type(e) for e in events] == [DegradedCapability]
+    assert "language change not applied" in events[0].reason
+    assert session._running.language_code == "en"
