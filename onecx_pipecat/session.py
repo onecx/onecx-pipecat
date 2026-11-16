@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -25,12 +26,13 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameProcessor
+from pipecat.services.llm_service import LLMService
 
 from onecx_pipecat.adapters.agent_config import AgentConfigError
 from onecx_pipecat.adapters.auth import AuthenticationError
 from onecx_pipecat.adapters.chat import Chat, ChatAccessError
-from onecx_pipecat.adapters.mcp import McpToolResult, propagated_headers
-from onecx_pipecat.adapters.permission import allowed_tools
+from onecx_pipecat.adapters.mcp import McpToolResult, propagated_headers, tool_set_hash
+from onecx_pipecat.adapters.permission import allowed_tools, required_permission_apps
 from onecx_pipecat.adapters.persistence import PersistenceError
 from onecx_pipecat.container import AppContainer
 from onecx_pipecat.models import (
@@ -79,6 +81,28 @@ class SessionState(StrEnum):
     CLOSED = "CLOSED"
 
 
+class _PinnedTools:
+    """The discovered, permission-gated tool set of one pinned configuration."""
+
+    def __init__(
+        self,
+        tools: list[AgentToolSnapshot],
+        tool_set_hash: str,
+        degraded: list[tuple[str, str]],
+    ) -> None:
+        self.tools = tools
+        self.tool_set_hash = tool_set_hash
+        self.degraded = degraded
+
+
+@dataclass(frozen=True)
+class TurnPin:
+    """What a turn executed against: its index and the advertised tool-set hash."""
+
+    turn_index: int
+    tool_set_hash: str
+
+
 class VoiceSession:
     """One focused voice session for one authenticated principal.
 
@@ -95,7 +119,9 @@ class VoiceSession:
         self._apm_principal_token: str = ""
         self._authorization: str = ""
         self._snapshot: AgentConfigSnapshot | None = None
-        self._chat: Chat | None = None
+        self._agent_id: str = ""
+        self._turn_index: int = 0
+        self._turn_pin: TurnPin | None = None
         self._allowed_tools: list[AgentToolSnapshot] = []
         self._start_failed = False
         self._llm: FrameProcessor | None = None
@@ -105,6 +131,7 @@ class VoiceSession:
         self._ai_context: list[str] = []
         self._llm_context: LLMContext | None = None
         self._history: list[dict[str, str]] = []
+        self._chat: Chat | None = None
         self._worker: PipelineWorker | None = None
         self._ended = False
         self._fatal_task: asyncio.Task[None] | None = None
@@ -128,6 +155,11 @@ class VoiceSession:
     @property
     def apm_principal_token(self) -> str:
         return self._apm_principal_token
+
+    @property
+    def turn_pin(self) -> TurnPin | None:
+        """The turn index and tool-set hash the current turn executes against."""
+        return self._turn_pin
 
     @property
     def start_failed(self) -> bool:
@@ -227,6 +259,7 @@ class VoiceSession:
                 dispatch=self.dispatch,
                 fatal_context_failure=self._fatal_context_failure,
                 vad_analyzer=build_vad_analyzer(self._container.settings),
+                begin_turn=self.begin_turn,
             )
             try:
                 await run_worker(self._worker)
@@ -292,8 +325,10 @@ class VoiceSession:
         self._apm_principal_token = ""
         self._authorization = ""
         self._snapshot = None
+        self._agent_id = ""
+        self._turn_index = 0
+        self._turn_pin = None
         self._chat = None
-        self._history = []
         self._ai_context = []
         self._llm_context = None
         self._allowed_tools = []
@@ -351,14 +386,15 @@ class VoiceSession:
         ):
             return self._fail_start("voice_not_permitted", "user lacks the voice permission")
 
-        # 4. Pin the agent configuration for the whole session.
+        # 4. Pin the agent configuration for the first turn; later turns re-pin at their boundary.
         try:
             snapshot = await self._container.agent_config.pin(
-                principal.tenant_id, agent_id, apm_principal_token
+                principal, agent_id, apm_principal_token
             )
         except AgentConfigError as exc:
             return self._fail_start("config_unavailable", str(exc))
         self._snapshot = snapshot
+        self._agent_id = agent_id
 
         # 5. Build the LLM and speech services for the pinned provider and language.
         settings = self._container.settings
@@ -371,15 +407,20 @@ class VoiceSession:
         except UnsupportedLanguageError as exc:
             return self._fail_start("unsupported_language", str(exc))
 
-        # 6. Discover tools once on the agent's own MCP servers, forwarding the user's tokens.
-        discovery = await self._container.mcp.discover(
-            snapshot.mcp_servers, propagated_headers(apm_principal_token, authorization)
-        )
-
-        # 7. Expose only tools the pinned configuration resolves to ALWAYS_ALLOW.
-        self._allowed_tools = allowed_tools(snapshot, discovery.tools)
+        # 6-7. Discover and gate the tool set for the first turn.
+        pinned = await self._pin_tools(principal, snapshot, apm_principal_token, authorization)
         self._llm, self._stt, self._tts = llm, stt, tts
-        self._tools = build_tools_schema(llm, self, snapshot, self._allowed_tools)
+        self._apply_turn_pin(pinned, llm)
+        self._turn_index = 1
+        self._turn_pin = TurnPin(self._turn_index, pinned.tool_set_hash)
+        logger.info(
+            "turn pinned",
+            extra={
+                "session_id": self.session_id,
+                "turn_index": 1,
+                "tool_set_hash": pinned.tool_set_hash,
+            },
+        )
 
         self.state = SessionState.READY
         events: list[Event] = [
@@ -390,7 +431,91 @@ class VoiceSession:
             )
         ]
         # 8. Report each skipped MCP server; the session continues degraded.
-        for server_name, reason in discovery.degraded:
+        for server_name, reason in pinned.degraded:
+            events.append(DegradedCapability(reason=f"{server_name}: {reason}"))
+        return events
+
+    async def _pin_tools(
+        self,
+        principal: Principal,
+        snapshot: AgentConfigSnapshot,
+        apm_principal_token: str,
+        authorization: str,
+    ) -> _PinnedTools:
+        """Discover the agent's MCP tools and keep only those the user may run.
+
+        Permission lookups are narrow: one per ``(product, app)`` that a
+        policy-allowed tool with a ``requiredPermission`` needs. A failed lookup
+        (``None``) hides those tools, so the gate fails closed.
+        """
+        discovery = await self._container.mcp.discover(
+            snapshot.mcp_servers, propagated_headers(apm_principal_token, authorization)
+        )
+        granted: dict[tuple[str, str], dict[str, list[str]] | None] = {}
+        for product_name, app_id in sorted(required_permission_apps(snapshot, discovery.tools)):
+            granted[
+                (product_name, app_id)
+            ] = await self._container.permission.application_permissions(
+                product_name, app_id, apm_principal_token, authorization
+            )
+        tools = allowed_tools(snapshot, discovery.tools, granted)
+        return _PinnedTools(tools, tool_set_hash(tools), discovery.degraded)
+
+    def _apply_turn_pin(self, pinned: _PinnedTools, llm: LLMService) -> None:
+        """Make ``pinned`` the tool set and prompt source for the following turn."""
+        self._allowed_tools = pinned.tools
+        self._tools = build_tools_schema(llm, self, self._snapshot, pinned.tools)
+        if self._llm_context is not None:
+            self._llm_context.set_tools(self._tools)
+            set_system_prompt(self._llm_context, self._current_system_prompt())
+
+    async def begin_turn(self) -> list[Event]:
+        """Re-pin configuration and tools at a user-turn boundary.
+
+        Configuration and MCP tool changes take effect here and nowhere else.
+        When the configuration refresh fails, the turn keeps the previously
+        pinned configuration and tools and reports ``degraded_capability``.
+        """
+        if (
+            self.state is not SessionState.READY
+            or self._principal is None
+            or self._snapshot is None
+        ):
+            return []
+        self._turn_index += 1
+        events: list[Event] = []
+        try:
+            snapshot = await self._container.agent_config.pin(
+                self._principal, self._agent_id, self._apm_principal_token
+            )
+        except AgentConfigError as exc:
+            # Keep the whole previous pin (configuration and discovered tool set) so the
+            # turn runs against one consistent version; the next successful refresh applies.
+            logger.warning(
+                "configuration refresh failed; keeping pinned configuration",
+                extra={"session_id": self.session_id, "turn_index": self._turn_index},
+            )
+            events.append(
+                DegradedCapability(reason=f"configuration refresh failed, previous kept: {exc}")
+            )
+            self._turn_pin = TurnPin(self._turn_index, self._turn_pin.tool_set_hash)
+            return events
+
+        self._snapshot = snapshot
+        pinned = await self._pin_tools(
+            self._principal, snapshot, self._apm_principal_token, self._authorization
+        )
+        self._apply_turn_pin(pinned, self._llm)
+        self._turn_pin = TurnPin(self._turn_index, pinned.tool_set_hash)
+        logger.info(
+            "turn pinned",
+            extra={
+                "session_id": self.session_id,
+                "turn_index": self._turn_index,
+                "tool_set_hash": pinned.tool_set_hash,
+            },
+        )
+        for server_name, reason in pinned.degraded:
             events.append(DegradedCapability(reason=f"{server_name}: {reason}"))
         return events
 

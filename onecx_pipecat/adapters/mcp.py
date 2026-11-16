@@ -8,6 +8,8 @@ any server that fails, so the session continues in a degraded state.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -139,6 +141,7 @@ class HttpMcpAdapter:
                         input_schema=dict(tool.inputSchema or {}),
                         server_name=server.name,
                         server_url=server.url,
+                        required_permission=_required_permission(tool.meta),
                     )
                     for tool in page.tools
                 )
@@ -171,3 +174,19 @@ def _reason(exc: BaseException) -> str:
     while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
         exc = exc.exceptions[0]
     return f"{type(exc).__name__}: {exc}"
+
+
+def _required_permission(meta: Mapping[str, Any] | None) -> str:
+    """The OneCX permission a tool declares in MCP ``_meta.requiredPermission``."""
+    value = (meta or {}).get("requiredPermission")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def tool_set_hash(tools: list[AgentToolSnapshot]) -> str:
+    """Deterministic SHA-256 over the advertised tool set, independent of discovery order."""
+    canonical = sorted(
+        (tool.model_dump(mode="json") for tool in tools),
+        key=lambda entry: (entry["server_name"], entry["tool_name"]),
+    )
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

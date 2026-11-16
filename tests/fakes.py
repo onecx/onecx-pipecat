@@ -76,11 +76,16 @@ class FakeChat:
 class FakeAgentConfig:
     def __init__(self) -> None:
         self._snapshots: dict[str, AgentConfigSnapshot] = {}
+        self.pins: list[tuple[str, str, str]] = []
+        self.fail_with: str | None = None
 
     def register(self, snapshot: AgentConfigSnapshot) -> None:
         self._snapshots[snapshot.agent_id] = snapshot
 
-    async def pin(self, tenant_id: str, agent_id: str, apm_principal_token: str):
+    async def pin(self, principal: Principal, agent_id: str, apm_principal_token: str):
+        self.pins.append((principal.tenant_id, agent_id, apm_principal_token))
+        if self.fail_with is not None:
+            raise AgentConfigError(self.fail_with)
         if agent_id not in self._snapshots:
             raise AgentConfigError(f"no configuration for agent={agent_id}")
         return self._snapshots[agent_id]
@@ -90,6 +95,9 @@ class FakePermission:
     def __init__(self) -> None:
         self._denied: set[str] = set()
         self.authorizations: list[str] = []
+        # (productName, appId) -> {resource: [actions]}; a missing key yields None (lookup failed).
+        self.grants: dict[tuple[str, str], dict[str, list[str]]] = {}
+        self.lookups: list[tuple[str, str]] = []
 
     def deny_voice(self, subject: str) -> None:
         self._denied.add(subject)
@@ -100,12 +108,19 @@ class FakePermission:
         self.authorizations.append(authorization)
         return principal.subject not in self._denied
 
+    async def application_permissions(
+        self, product_name: str, app_id: str, apm_principal_token: str, authorization: str
+    ):
+        self.lookups.append((product_name, app_id))
+        return self.grants.get((product_name, app_id))
+
 
 class FakeMcp:
     """Reports the tools/failures seeded per server, recording what discovery was asked."""
 
     def __init__(self) -> None:
         self.tools: dict[str, list[str]] = {}
+        self.required: dict[tuple[str, str], str] = {}
         self.failures: dict[str, str] = {}
         self.calls: list[tuple[list[str], dict[str, str]]] = []
         self.invocations: list[tuple[str, str, dict[str, str]]] = []
@@ -122,7 +137,10 @@ class FakeMcp:
             for name in self.tools.get(server.name, []):
                 discovery.tools.append(
                     AgentToolSnapshot(
-                        tool_name=name, server_name=server.name, server_url=server.url
+                        tool_name=name,
+                        server_name=server.name,
+                        server_url=server.url,
+                        required_permission=self.required.get((server.name, name), ""),
                     )
                 )
         return discovery

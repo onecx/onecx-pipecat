@@ -50,6 +50,10 @@ class McpServerSnapshot(BaseModel):
     credential_ref: str = ""
     unlisted_tool_permission: PermissionAction = PermissionAction.DENY
     tool_rules: list[ToolRule] = Field(default_factory=list)
+    # The OneCX product/app whose permissions gate this server's tools that
+    # declare a ``requiredPermission``; "" when the server publishes none.
+    permission_product_name: str = ""
+    permission_app_id: str = ""
 
 
 class ProviderSnapshot(BaseModel):
@@ -115,6 +119,9 @@ class AgentToolSnapshot(BaseModel):
     server_url: str = ""
     tool_description: str = ""
     input_schema: dict[str, Any] = Field(default_factory=dict)
+    # OneCX permission the user must hold to use the tool, e.g. ``onecx:event#mcp-read``
+    # (MCP ``_meta.requiredPermission``); "" when the tool declares none.
+    required_permission: str = ""
 
 
 class VoiceEntryKind(StrEnum):

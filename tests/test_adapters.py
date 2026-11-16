@@ -379,7 +379,7 @@ async def _pin(status: int, body: dict | None = None, seen: list | None = None):
 
     adapter = HttpAgentConfigAdapter(AgentConfigSettings(base_url="http://ai"))
     adapter.set_client(_client(handler))
-    return await adapter.pin("local", "agent-1", "tok")
+    return await adapter.pin(_PRINCIPAL, "agent-1", "tok")
 
 
 async def test_agent_config_parses_ai_provider_configuration():
@@ -478,7 +478,7 @@ async def test_agent_config_non_json_body_fails_closed():
     adapter = HttpAgentConfigAdapter(AgentConfigSettings(base_url="http://ai"))
     adapter.set_client(_client(lambda _req: httpx.Response(200, content=b"<html>")))
     with pytest.raises(AgentConfigError):
-        await adapter.pin("local", "agent-1", "tok")
+        await adapter.pin(_PRINCIPAL, "agent-1", "tok")
 
 
 async def test_agent_id_is_escaped_in_the_url_path():
@@ -490,7 +490,7 @@ async def test_agent_id_is_escaped_in_the_url_path():
 
     adapter = HttpAgentConfigAdapter(AgentConfigSettings(base_url="http://ai"))
     adapter.set_client(_client(handler))
-    await adapter.pin("local", "a/b?c#d", "tok")
+    await adapter.pin(_PRINCIPAL, "a/b?c#d", "tok")
     assert seen[0].url.raw_path == b"/v1/agents/a%2Fb%3Fc%23d/configuration"
 
 

@@ -96,6 +96,7 @@ def build_voice_pipeline(
     dispatch: Callable[[Command], Awaitable[list[Event]]],
     fatal_context_failure: Callable[[Exception], Awaitable[None]],
     vad_analyzer: VADAnalyzer | None = None,
+    begin_turn: Callable[[], Awaitable[list[Event]]] | None = None,
 ) -> PipelineWorker:
     sample_rate = settings.speech.sample_rate_hz
     transport = FastAPIWebsocketTransport(
@@ -129,6 +130,8 @@ def build_voice_pipeline(
         fatal_context_failure=fatal_context_failure,
     )
 
+    if begin_turn is not None:
+        user.event_handler("on_user_turn_started")(_turn_started_handler(begin_turn, emit))
     pipeline = Pipeline(
         [
             transport.input(),
@@ -173,6 +176,19 @@ def build_voice_pipeline(
         await worker.cancel(reason="client_disconnected")
 
     return worker
+
+
+def _turn_started_handler(
+    begin_turn: Callable[[], Awaitable[list[Event]]],
+    emit: Callable[[Event], Awaitable[None]],
+) -> Callable[..., Awaitable[None]]:
+    """Re-pin configuration and tools at each user-turn start, before the LLM request."""
+
+    async def on_user_turn_started(_aggregator, _strategy) -> None:
+        for event in await begin_turn():
+            await emit(event)
+
+    return on_user_turn_started
 
 
 def _user_params(vad_analyzer: VADAnalyzer | None) -> LLMUserAggregatorParams:

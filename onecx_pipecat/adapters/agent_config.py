@@ -9,6 +9,7 @@ voice session must not start without a usable configuration.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -20,6 +21,7 @@ from onecx_pipecat.models import (
     McpServerSnapshot,
     ModelSnapshot,
     PermissionAction,
+    Principal,
     ProviderSnapshot,
     SkillSnapshot,
     ToolRule,
@@ -36,15 +38,27 @@ class AgentConfigAdapter(Protocol):
     """Replaceable agent-configuration boundary."""
 
     async def pin(
-        self, tenant_id: str, agent_id: str, apm_principal_token: str
+        self, principal: Principal, agent_id: str, apm_principal_token: str
     ) -> AgentConfigSnapshot: ...
+
+
+# Version of the ai-provider configuration contract this client understands; it is
+# part of the cache key so a contract change never reuses an older payload.
+CONFIGURATION_CONTRACT_VERSION = "1"
+
+_CacheKey = tuple[str, str, str, str]
 
 
 class HttpAgentConfigAdapter:
     """Pin the agent configuration from ai-provider ``GET /v1/agents/{id}/configuration``.
 
     Propagates ``apm-principal-token`` so the configuration is fetched as the
-    user. Missing (404), invalid (409), or unreachable agents raise
+    user. Each fetch sends ``If-None-Match`` with the cached ETag, so an
+    unchanged configuration is answered with ``304`` and the cached snapshot is
+    reused. Loads are cached and single-flighted per tenant, principal subject,
+    agent and contract version: concurrent pins share one request. A failed
+    refresh raises ``AgentConfigError`` and leaves the cache untouched.
+    Missing (404), invalid (409), or unreachable agents raise
     ``AgentConfigError``; an agent without ``voice.voiceEnabled`` is rejected
     the same way.
     """
@@ -57,16 +71,51 @@ class HttpAgentConfigAdapter:
         self._settings = settings or AgentConfigSettings()
         self._service_auth = service_auth
         self._client: httpx.AsyncClient | None = None
+        self._cache: dict[_CacheKey, tuple[str, AgentConfigSnapshot]] = {}
+        self._inflight: dict[_CacheKey, asyncio.Future[AgentConfigSnapshot]] = {}
 
     def set_client(self, client: httpx.AsyncClient) -> None:
         """Inject a client (used by tests to avoid a live network call)."""
         self._client = client
 
     async def pin(
-        self, tenant_id: str, agent_id: str, apm_principal_token: str
+        self, principal: Principal, agent_id: str, apm_principal_token: str
     ) -> AgentConfigSnapshot:
-        client = self._client or httpx.AsyncClient()
+        key: _CacheKey = (
+            principal.tenant_id,
+            principal.subject,
+            agent_id,
+            CONFIGURATION_CONTRACT_VERSION,
+        )
+        pending = self._inflight.get(key)
+        if pending is not None:
+            return await asyncio.shield(pending)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[AgentConfigSnapshot] = loop.create_future()
+        self._inflight[key] = future
+        try:
+            snapshot = await self._fetch(key, agent_id, apm_principal_token)
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+        except BaseException as exc:
+            future.set_exception(exc)
+            future.exception()  # mark retrieved; waiters re-raise it
+            raise
+        else:
+            future.set_result(snapshot)
+            return snapshot
+        finally:
+            self._inflight.pop(key, None)
+
+    async def _fetch(
+        self, key: _CacheKey, agent_id: str, apm_principal_token: str
+    ) -> AgentConfigSnapshot:
+        cached = self._cache.get(key)
         headers = {"apm-principal-token": apm_principal_token}
+        if cached is not None:
+            headers["If-None-Match"] = cached[0]
+        client = self._client or httpx.AsyncClient()
         try:
             try:
                 response = await client.get(
@@ -76,6 +125,10 @@ class HttpAgentConfigAdapter:
                 )
             except httpx.HTTPError as exc:
                 raise AgentConfigError(f"agent configuration unreachable: {exc}") from exc
+            if response.status_code == 304:
+                if cached is None:
+                    raise AgentConfigError(f"unexpected 304 for agent={agent_id}")
+                return cached[1]
             if response.status_code == 404:
                 raise AgentConfigError(f"no configuration for agent={agent_id}")
             if response.status_code == 409:
@@ -88,7 +141,13 @@ class HttpAgentConfigAdapter:
                 raise AgentConfigError(
                     f"agent configuration for agent={agent_id} is not valid JSON"
                 ) from exc
-            return _parse_configuration(body, agent_id)
+            snapshot = _parse_configuration(body, agent_id)
+            etag = response.headers.get("etag")
+            if etag:
+                self._cache[key] = (etag, snapshot)
+            else:
+                self._cache.pop(key, None)
+            return snapshot
         finally:
             if client is not self._client:
                 await client.aclose()
@@ -191,6 +250,8 @@ def _parse_mcp_server(entry: dict[str, Any]) -> McpServerSnapshot:
         name=str(entry["name"]),
         url=str(entry["url"]),
         credential_ref=str(entry.get("credentialRef") or ""),
+        permission_product_name=str(entry.get("permissionProductName") or ""),
+        permission_app_id=str(entry.get("permissionAppId") or ""),
         # A server without a resolved unlisted policy advertises nothing it did not list.
         unlisted_tool_permission=PermissionAction(entry.get("unlistedToolPermission") or "DENY"),
         tool_rules=[

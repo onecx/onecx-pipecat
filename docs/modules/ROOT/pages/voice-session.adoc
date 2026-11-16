@@ -32,10 +32,11 @@ silently forgot the conversation would be wrong;
 . checks the user's existing voice permission with the `authorization` access
 token;
 . pins the agent configuration (provider, model, system prompt, skills, MCP
-servers) for the whole session;
+servers) for turn 1;
 . builds the LLM (provider credentials are resolved from
 `ONECX_CREDENTIALS__REFS`) and the speech services for the pinned language;
-. discovers MCP tools once and keeps only those that resolve to `ALWAYS_ALLOW`.
+. discovers MCP tools and keeps only those that resolve to `ALWAYS_ALLOW` and
+whose `requiredPermission`, if any, the user holds.
 
 Every step fails closed: a typed `error` event, then `session_closed` (reason
 `start_failed`), then the connection closes with code `1008`. A failed start
@@ -150,6 +151,32 @@ Example turn with server VAD:
 
 With client turn detection the audio is wrapped in `user_started_speaking` and
 `user_stopped_speaking` commands.
+
+== Turn boundaries
+
+Configuration and tools are pinned per turn, not per session. A turn starts when
+the user begins speaking (`on_user_turn_started`); before that turn's LLM
+request the session:
+
+. re-reads the agent configuration with `If-None-Match`. An unchanged
+configuration is answered with `304` and reused from the cache; a changed one
+replaces the pinned snapshot;
+. re-discovers MCP tools and re-applies the policy and permission gate;
+. records the turn's `tool_set_hash` and logs `turn pinned`.
+
+Changes therefore apply only at turn boundaries. A turn that is already running
+keeps the configuration and tool set it started with.
+
+If the configuration refresh fails (for example ai-provider is unreachable or
+the agent is no longer valid), the session keeps its previous pinned
+configuration and tool set for that turn and emits a `degraded_capability` event
+with reason `configuration refresh failed, previous kept: <error>`. The session does not
+close. The next turn retries the refresh.
+
+NOTE: Only the system prompt, skills, MCP tool set and tool schema are re-pinned
+per turn. The LLM provider and model, and the STT and TTS services, are built
+into the pipeline at start and stay fixed for the session. Changing them requires
+a new session.
 
 == Turns, barge-in and persistence
 

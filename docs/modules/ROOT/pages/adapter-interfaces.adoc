@@ -47,12 +47,27 @@ and a token with no `kid` falls back to the first key in the set.
 
 == Agent Configuration
 
-* Protocol: `AgentConfigAdapter.pin(tenant_id, agent_id,
+* Protocol: `AgentConfigAdapter.pin(principal, agent_id,
   apm_principal_token) -> AgentConfigSnapshot`
 * Implementation: `HttpAgentConfigAdapter`
 
-The snapshot is pinned **once**, when the session starts, and is not re-read
-for the lifetime of the session. `HttpAgentConfigAdapter` calls
+The session pins a snapshot at start and re-pins it at every turn boundary (see
+xref:voice-session.adoc#_turn_boundaries[Turn boundaries]). Between turns the
+configuration is not re-read.
+
+Cache and refresh:
+
+* The cache key is tenant, principal subject, agent id and contract version
+  (`CONFIGURATION_CONTRACT_VERSION`, currently `1`). A different key never reuses
+  another user's or agent's snapshot.
+* A fetch sends `If-None-Match` with the cached ETag. `304 Not Modified` returns
+  the cached snapshot without re-parsing; `200` replaces the cache entry.
+* Concurrent pins for the same key are single-flighted: they share one request.
+* A failed refresh raises `AgentConfigError` and leaves the cache untouched.
+  At a turn boundary the session keeps its previous pin (see
+  xref:voice-session.adoc#_turn_boundaries[Turn boundaries]).
+
+`HttpAgentConfigAdapter` calls
 onecx-ai-provider-svc
 `GET {agent_config.base_url}/v1/agents/{id}/configuration` with the
 `apm-principal-token` header and parses the `AgentConfiguration` payload:
@@ -147,6 +162,26 @@ discovered tool, `resolve_tool_permission` uses:
 `allowed_tools` returns only the discovered tools that resolve to
 `ALWAYS_ALLOW`; those are the tools the session advertises.
 
+Per-tool OneCX permission gate:
+
+* An MCP tool may declare `_meta.requiredPermission` as
+  `onecx:<area>#<action>` (for example `onecx:event#mcp-read`). It is parsed
+  into resource `onecx:<area>` and action `mcp-read`.
+* Each MCP server in the configuration publishes its own
+  `permissionProductName` and `permissionAppId`. Pipecat looks up the user's
+  permissions for that application once per distinct pair per turn, with
+  `PermissionAdapter.application_permissions(product, app, token, authorization)`.
+  Only applications needed by a discovered, policy-allowed tool are queried.
+* A tool with `requiredPermission` is advertised only when the lookup succeeded
+  and the user holds the action on the resource. A missing lookup result, a
+  malformed value, or a server without `permissionProductName`/`permissionAppId`
+  hides the tool (fail closed).
+* A tool without `requiredPermission` is not gated by this check; only the
+  `toolRules[]` policy applies. This is deliberate, so existing tools keep
+  working until their servers publish permission metadata.
+* The gate consumes the existing permission-svc endpoint and needs no change
+  to `onecx-permission-svc`.
+
 == MCP
 
 * Protocol: `McpAdapter` —
@@ -161,10 +196,18 @@ globally except `mcp.timeout_seconds`. Each call opens an MCP session
 onecx-ai-provider-runtime: `apm-principal-token`, and the user's
 `Authorization` from `start_session` forwarded as `UserAuthorization`.
 Pipecat's service token is never sent to MCP servers. `discover` pages through
-`tools/list` once per
-session start and returns an `McpDiscovery` with the tools and a list of
-`(server_name, reason)` pairs for servers that failed; a failing server is
-surfaced as a `degraded_capability` event rather than aborting the session.
+`tools/list` at each turn
+boundary (the first turn is the session start) and returns an `McpDiscovery`
+with the tools and a list of `(server_name, reason)` pairs for servers that
+failed; a failing server is surfaced as a `degraded_capability` event rather
+than aborting the session. Pipecat does not keep a persistent
+`notifications/tools/list_changed` listener: a change on the server takes
+effect at the next turn boundary, when `tools/list` is read again.
+
+Each turn records a deterministic `tool_set_hash`: a SHA-256 over the advertised
+tools (`server_name`, `tool_name` and their schema and permission fields), sorted
+so discovery order does not matter. The hash is written to the turn pin and to
+the `turn pinned` log entry.
 `invoke` runs `tools/call`; a tool error or an unreachable server is a
 sanitized `McpToolResult(ok=False, error=...)`, otherwise `value` is the
 structured content or the tool's text.
