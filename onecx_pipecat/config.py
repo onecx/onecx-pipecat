@@ -158,8 +158,20 @@ class LlmSettings(BaseSettings):
 class PipelineSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ONECX_PIPELINE__")
 
-    # Seconds without bot/user speech activity before the pipeline ends; None disables.
-    idle_timeout_secs: float | None = None
+    # Session limits. Each one ends the session with its own typed outcome
+    # (``session_idle_timeout`` / ``session_max_duration`` / ``audio_message_too_large``);
+    # 0 disables the limit.
+    #
+    # Seconds without user or bot speech activity (VAD speech, client turns, bot
+    # speech) before the session ends. A long model or tool call with no bot
+    # speech counts as idle, so keep this generous.
+    idle_timeout_secs: float = Field(default=300.0, ge=0)
+    # Seconds from ``session_ready`` until the session is ended, whatever its activity.
+    max_session_duration_secs: float = Field(default=3600.0, ge=0)
+    # Largest decoded audio payload of one ``audio`` message, in bytes. PCM16 mono
+    # at 16 kHz is 32 000 bytes per second, so the default is about one second;
+    # chat-ui sends 40 ms (1 280 byte) chunks.
+    max_audio_message_bytes: int = Field(default=32768, ge=0)
 
 
 class VoiceSettings(BaseSettings):

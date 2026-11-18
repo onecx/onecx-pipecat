@@ -26,12 +26,14 @@ from fastapi import WebSocket
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.vad_analyzer import VADAnalyzer
 from pipecat.frames.frames import (
+    BotSpeakingFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     InterimTranscriptionFrame,
     OutputTransportMessageUrgentFrame,
     TranscriptionFrame,
     TTSTextFrame,
+    UserSpeakingFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
@@ -60,13 +62,21 @@ from onecx_pipecat.pipeline.captions import (
 from onecx_pipecat.pipeline.persistence import attach_persistence
 from onecx_pipecat.pipeline.processors import SessionControl, WireEvents
 from onecx_pipecat.pipeline.serializer import OnecxFrameSerializer
-from onecx_pipecat.protocol import Command, ErrorEvent, Event
+from onecx_pipecat.protocol import Command, EndReason, ErrorEvent, Event
 
 _ERROR_MESSAGES = {
     "stt_failed": "speech recognition failed",
     "llm_failed": "language model failed",
     "tts_failed": "speech synthesis failed",
 }
+
+
+_ACTIVITY_FRAMES = (
+    BotSpeakingFrame,
+    UserSpeakingFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
+)
 
 
 def build_llm_context(
@@ -95,6 +105,7 @@ def build_voice_pipeline(
     save_entry: Callable[[VoiceEntry], Awaitable[str]],
     dispatch: Callable[[Command], Awaitable[list[Event]]],
     fatal_context_failure: Callable[[Exception], Awaitable[None]],
+    limit_exceeded: Callable[[EndReason], None] | None = None,
     vad_analyzer: VADAnalyzer | None = None,
 ) -> PipelineWorker:
     sample_rate = settings.speech.sample_rate_hz
@@ -107,7 +118,7 @@ def build_voice_pipeline(
             audio_out_sample_rate=sample_rate,
             audio_out_auto_silence=False,
             audio_out_end_silence_secs=0,
-            serializer=OnecxFrameSerializer(sample_rate),
+            serializer=OnecxFrameSerializer(sample_rate, settings.pipeline.max_audio_message_bytes),
         ),
     )
 
@@ -132,7 +143,13 @@ def build_voice_pipeline(
     pipeline = Pipeline(
         [
             transport.input(),
-            SessionControl(dispatch, emit),
+            SessionControl(
+                dispatch,
+                emit,
+                audio_too_large=(lambda: limit_exceeded("audio_message_too_large"))
+                if limit_exceeded
+                else None,
+            ),
             stt,
             WireEvents(urgent=(InterimTranscriptionFrame, TranscriptionFrame)),
             user,
@@ -158,8 +175,18 @@ def build_voice_pipeline(
         pipeline,
         params=PipelineParams(audio_in_sample_rate=sample_rate, audio_out_sample_rate=sample_rate),
         enable_rtvi=False,
-        idle_timeout_secs=settings.pipeline.idle_timeout_secs,
+        idle_timeout_secs=settings.pipeline.idle_timeout_secs or None,
+        # Activity is VAD speech, bot speech and user turns. Client turn detection
+        # (push-to-talk) has no VAD, so without the turn frames it would look idle.
+        idle_timeout_frames=_ACTIVITY_FRAMES,
+        # The session ends itself, with a typed outcome, from ``on_idle_timeout``.
+        cancel_on_idle_timeout=False,
     )
+
+    @worker.event_handler("on_idle_timeout")
+    async def on_idle_timeout(_worker) -> None:
+        if limit_exceeded is not None:
+            limit_exceeded("session_idle_timeout")
 
     sources = {id(stt): "stt_failed", id(llm): "llm_failed", id(tts): "tts_failed"}
 

@@ -172,6 +172,28 @@ permission.
 | HTTP timeout for MCP calls. MCP server URLs are *not* configured here: they
 come from each agent's configuration (`mcpServers[].url`).
 
+| `pipeline.idle_timeout_secs`
+| `300`
+| Seconds without activity (VAD speech, a client turn, assistant speech)
+before the session ends with `session_idle_timeout`. `0` disables it. A long
+model or tool call without assistant speech counts as idle. Env:
+`ONECX_PIPELINE__IDLE_TIMEOUT_SECS`.
+
+| `pipeline.max_session_duration_secs`
+| `3600`
+| Seconds from `session_ready` until the session ends with
+`session_max_duration`, whatever its activity. `0` disables it. Keep it at or
+below the proxy timeouts in front of the service. Env:
+`ONECX_PIPELINE__MAX_SESSION_DURATION_SECS`.
+
+| `pipeline.max_audio_message_bytes`
+| `32768`
+| Largest decoded payload of one `audio` message, in bytes; a larger one ends
+the session with `audio_message_too_large`. `0` disables it. PCM16 mono at
+16 kHz is 32 000 bytes per second, so the default is about one second of
+audio, versus the 40 ms (1 280 byte) chunks chat-ui sends. Env:
+`ONECX_PIPELINE__MAX_AUDIO_MESSAGE_BYTES`.
+
 | `credentials.refs`
 | `{}`
 | JSON map of `credentialRef` -> secret (`ONECX_CREDENTIALS__REFS`), e.g.

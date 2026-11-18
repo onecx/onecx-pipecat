@@ -3,7 +3,7 @@ import logging
 import pytest
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
-from onecx_pipecat.config import Settings, SpeechSettings
+from onecx_pipecat.config import PipelineSettings, Settings, SpeechSettings
 from onecx_pipecat.container import AppContainer
 from onecx_pipecat.models import (
     AgentConfigSnapshot,
@@ -458,3 +458,75 @@ async def test_run_pipeline_requires_a_started_session():
     session = _session(_container())
     with pytest.raises(RuntimeError):
         await session.run_pipeline(None)  # type: ignore[arg-type]
+
+
+async def test_max_duration_is_measured_from_session_ready():
+    container = _container()
+    container.settings.pipeline = PipelineSettings(max_session_duration_secs=60)
+    session = _session(container)
+    assert not session.max_duration_exceeded()  # not started
+    await session.dispatch(_start())
+    assert not session.max_duration_exceeded()
+    ready_at = session._ready_at
+    assert not session.max_duration_exceeded(now=ready_at + 59.9)
+    assert session.max_duration_exceeded(now=ready_at + 60)
+
+
+async def test_a_zero_max_duration_disables_the_limit():
+    container = _container()
+    container.settings.pipeline = PipelineSettings(max_session_duration_secs=0)
+    session = _session(container)
+    await session.dispatch(_start())
+    assert not session.max_duration_exceeded(now=session._ready_at + 10**9)
+
+
+@pytest.mark.parametrize(
+    ("reason", "close_code"),
+    [
+        ("session_max_duration", 1000),
+        ("session_idle_timeout", 1000),
+        ("audio_message_too_large", 1008),
+    ],
+)
+async def test_each_limit_ends_the_session_with_its_own_typed_outcome(reason, close_code):
+    session = _session(_container())
+    await session.dispatch(_start())
+
+    await session.end_for_limit(reason)
+
+    assert session.state is SessionState.CLOSED
+    assert [e.kind for e in session._final_events] == ["error", "session_closed"]
+    assert session._final_events[0].code == reason
+    assert session._final_events[1].reason == reason
+    assert session._close_code == close_code
+
+
+async def test_the_first_limit_wins_and_later_ones_are_ignored():
+    session = _session(_container())
+    await session.dispatch(_start())
+
+    await session.end_for_limit("session_idle_timeout")
+    await session.end_for_limit("session_max_duration")
+
+    assert session._final_events[1].reason == "session_idle_timeout"
+
+
+async def test_a_limit_on_a_session_that_is_not_running_is_ignored():
+    session = _session(_container())
+    await session.end_for_limit("session_max_duration")
+    assert session.state is SessionState.CREATED
+    assert session._final_events == []
+
+
+async def test_limit_exceeded_from_the_pipeline_shuts_down_in_a_separate_task():
+    session = _session(_container())
+    await session.dispatch(_start())
+
+    session.limit_exceeded("audio_message_too_large")
+    session.limit_exceeded("session_idle_timeout")  # ignored: already ending
+    assert session._fatal_task is not None
+    await session._fatal_task
+
+    assert session.state is SessionState.CLOSED
+    assert session._final_events[1].reason == "audio_message_too_large"
+    assert session._close_code == 1008

@@ -51,6 +51,8 @@ from onecx_pipecat.protocol import (
 )
 
 BAD_COMMAND = {"type": "bad_command"}
+# An ``audio`` message above the size limit; ``SessionControl`` ends the session on it.
+AUDIO_TOO_LARGE = {"type": "audio_message_too_large"}
 
 
 def caption_text(frame: Frame) -> str | None:
@@ -88,9 +90,11 @@ def wire_event(frame: Frame) -> Event | None:
 
 
 class OnecxFrameSerializer(FrameSerializer):
-    def __init__(self, sample_rate: int = 16000, **kwargs: Any) -> None:
+    def __init__(self, sample_rate: int = 16000, max_audio_bytes: int = 0, **kwargs: Any) -> None:
+        """``max_audio_bytes`` caps the decoded payload of one audio message; 0 means no cap."""
         super().__init__(**kwargs)
         self._sample_rate = sample_rate
+        self._max_audio_bytes = max_audio_bytes
 
     async def serialize(self, frame: Frame) -> str | bytes | None:
         if isinstance(frame, OutputTransportMessageFrame | OutputTransportMessageUrgentFrame):
@@ -120,12 +124,22 @@ class OnecxFrameSerializer(FrameSerializer):
     def _audio(self, encoded: object) -> Frame:
         if not isinstance(encoded, str) or not encoded:
             return _bad_command()
+        limit = self._max_audio_bytes
+        # Cheap pre-check on the encoded length, so an oversized message is never decoded.
+        if limit and len(encoded) > (limit + 2) // 3 * 4:
+            return _audio_too_large()
         try:
             audio = base64.b64decode(encoded, validate=True)
         except (binascii.Error, ValueError):
             return _bad_command()
+        if limit and len(audio) > limit:
+            return _audio_too_large()
         return InputAudioRawFrame(audio=audio, sample_rate=self._sample_rate, num_channels=1)
 
 
 def _bad_command() -> InputTransportMessageFrame:
     return InputTransportMessageFrame(message=dict(BAD_COMMAND))
+
+
+def _audio_too_large() -> InputTransportMessageFrame:
+    return InputTransportMessageFrame(message=dict(AUDIO_TOO_LARGE))

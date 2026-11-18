@@ -1,4 +1,5 @@
 import base64
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -253,3 +254,80 @@ def test_ws_off_policy_allows_a_missing_origin():
         ws.send_json(_start())
         assert _receive_json_bounded(ws)["kind"] == "session_ready"
         end_session(ws)
+
+
+def _expect_limit_end(ws, reason: str, close_code: int) -> None:
+    assert _until(ws, "error")[-1]["code"] == reason
+    assert _receive_json_bounded(ws) == {"kind": "session_closed", "reason": reason}
+    with pytest.raises(WebSocketDisconnect) as closed:
+        _receive_json_bounded(ws)
+    assert closed.value.code == close_code
+
+
+def test_ws_session_ends_at_the_maximum_duration():
+    container = _container()
+    container.settings.pipeline.max_session_duration_secs = 0.2
+    client = TestClient(create_app(container, expiry_check_seconds=0.05))
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.send_json(_start())
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
+        _expect_limit_end(ws, "session_max_duration", 1000)
+
+
+def test_ws_idle_session_ends_with_a_typed_idle_timeout():
+    container = _container()
+    container.settings.pipeline.idle_timeout_secs = 0.3
+    client = TestClient(create_app(container))
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.send_json(_start())
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
+        _expect_limit_end(ws, "session_idle_timeout", 1000)
+
+
+def test_ws_a_push_to_talk_turn_counts_as_activity_for_the_idle_timeout():
+    # Client turn detection has no VAD, so no UserSpeakingFrame ever arrives; the
+    # turn start is the only user activity. Starting a turn halfway through the
+    # idle timeout must therefore push the idle end out by about half the timeout.
+    idle = 0.8
+    container = _container()
+    container.settings.pipeline.idle_timeout_secs = idle
+    client = TestClient(create_app(container))
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.send_json(_start())
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
+        ready = time.monotonic()
+        time.sleep(0.5)
+        ws.send_json({"type": "user_started_speaking"})
+        events = _until(ws, "session_closed")
+        elapsed = time.monotonic() - ready
+        assert events[-1] == {"kind": "session_closed", "reason": "session_idle_timeout"}
+        assert elapsed >= 0.5 + idle - 0.2, f"idle fired {elapsed:.2f}s after ready"
+        wait_for_close(ws)
+
+
+def test_ws_oversized_audio_ends_the_session_with_a_typed_outcome():
+    container = _container()
+    container.settings.pipeline.max_audio_message_bytes = 1280
+    client = TestClient(create_app(container))
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.send_json(_start())
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
+        ws.send_json({"type": "audio", "audio": _AUDIO})  # 320 bytes: accepted
+        ws.send_json({"type": "audio", "audio": base64.b64encode(b"\x01" * 1281).decode("ascii")})
+        _expect_limit_end(ws, "audio_message_too_large", 1008)
+
+
+def test_ws_limits_do_not_fire_for_a_session_within_them():
+    container = _container()
+    container.settings.pipeline.max_audio_message_bytes = 1280
+    container.settings.pipeline.idle_timeout_secs = 5
+    container.settings.pipeline.max_session_duration_secs = 60
+    client = TestClient(create_app(container, expiry_check_seconds=0.05))
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.send_json(_start())
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
+        _speak(ws)
+        time.sleep(0.3)
+        ws.send_json({"type": "stop"})
+        assert _until(ws, "session_closed")[-1]["reason"] == "client_stopped"
+        wait_for_close(ws)

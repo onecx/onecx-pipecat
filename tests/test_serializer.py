@@ -22,7 +22,11 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
 )
 
-from onecx_pipecat.pipeline.serializer import BAD_COMMAND, OnecxFrameSerializer
+from onecx_pipecat.pipeline.serializer import (
+    AUDIO_TOO_LARGE,
+    BAD_COMMAND,
+    OnecxFrameSerializer,
+)
 
 
 @pytest.fixture
@@ -145,3 +149,45 @@ async def test_transport_messages_are_sent_as_is(serializer, frame_type):
 async def test_other_frames_are_ignored(serializer):
     assert await serializer.serialize(TextFrame("x")) is None
     assert await serializer.serialize(OutputTransportMessageFrame(message="not a dict")) is None
+
+
+def _audio_message(size: int) -> str:
+    return json.dumps({"type": "audio", "audio": base64.b64encode(b"\x01" * size).decode()})
+
+
+async def test_audio_at_the_size_limit_is_accepted():
+    frame = await OnecxFrameSerializer(16000, max_audio_bytes=1280).deserialize(
+        _audio_message(1280)
+    )
+    assert isinstance(frame, InputAudioRawFrame)
+    assert len(frame.audio) == 1280
+
+
+@pytest.mark.parametrize("size", [1281, 1282, 1283, 5_000_000])
+async def test_audio_above_the_size_limit_is_flagged_not_raised(size):
+    frame = await OnecxFrameSerializer(16000, max_audio_bytes=1280).deserialize(
+        _audio_message(size)
+    )
+    assert isinstance(frame, InputTransportMessageFrame)
+    assert frame.message == AUDIO_TOO_LARGE
+
+
+async def test_oversized_audio_is_flagged_before_it_is_decoded():
+    # Not valid base64, but long enough to exceed the cap: flagged as too large
+    # (never decoded) instead of malformed.
+    frame = await OnecxFrameSerializer(16000, max_audio_bytes=3).deserialize(
+        json.dumps({"type": "audio", "audio": "*" * 100})
+    )
+    assert frame.message == AUDIO_TOO_LARGE
+
+
+async def test_a_zero_size_limit_disables_the_check():
+    frame = await OnecxFrameSerializer(16000, max_audio_bytes=0).deserialize(
+        _audio_message(200_000)
+    )
+    assert isinstance(frame, InputAudioRawFrame)
+
+
+async def test_a_client_cannot_send_the_oversize_marker_itself(serializer):
+    frame = await serializer.deserialize(json.dumps(AUDIO_TOO_LARGE))
+    assert frame.message == BAD_COMMAND

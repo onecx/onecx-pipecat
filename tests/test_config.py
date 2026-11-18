@@ -1,3 +1,5 @@
+import pytest
+
 from onecx_pipecat.config import Settings
 
 
@@ -84,3 +86,27 @@ def test_voice_origin_policy_defaults_to_deny():
 def test_voice_origin_policy_env_override(monkeypatch):
     monkeypatch.setenv("ONECX_VOICE__ORIGIN_POLICY", "same-host")
     assert Settings(_env_file=None).voice.origin_policy == "same-host"
+
+
+def test_session_limit_defaults():
+    pipeline = Settings(_env_file=None).pipeline
+    assert pipeline.idle_timeout_secs == 300
+    assert pipeline.max_session_duration_secs == 3600
+    # About one second of 16 kHz PCM16 mono; chat-ui sends 1 280 byte chunks.
+    assert pipeline.max_audio_message_bytes == 32768
+
+
+def test_session_limits_are_configurable_and_zero_disables(monkeypatch):
+    monkeypatch.setenv("ONECX_PIPELINE__IDLE_TIMEOUT_SECS", "0")
+    monkeypatch.setenv("ONECX_PIPELINE__MAX_SESSION_DURATION_SECS", "120.5")
+    monkeypatch.setenv("ONECX_PIPELINE__MAX_AUDIO_MESSAGE_BYTES", "4096")
+    pipeline = Settings(_env_file=None).pipeline
+    assert pipeline.idle_timeout_secs == 0
+    assert pipeline.max_session_duration_secs == 120.5
+    assert pipeline.max_audio_message_bytes == 4096
+
+
+def test_negative_session_limits_are_rejected(monkeypatch):
+    monkeypatch.setenv("ONECX_PIPELINE__MAX_SESSION_DURATION_SECS", "-1")
+    with pytest.raises(ValueError):
+        Settings(_env_file=None)

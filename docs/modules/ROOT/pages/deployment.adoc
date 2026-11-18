@@ -251,9 +251,14 @@ startup.
 * `ONECX_SPEECH__SAMPLE_RATE_HZ` must equal the capture and playback rate of
 chat-ui. Transcribe streaming accepts only 8000 and 16000 Hz, so keep
 `16000` unless chat-ui and Transcribe are both changed.
-* `ONECX_PIPELINE__IDLE_TIMEOUT_SECS` is unset by default, so a session whose
-browser tab stays open never ends by itself. Set it (seconds without user or
-bot speech) to end abandoned sessions.
+* Session limits end a session with a typed outcome (see
+xref:voice-session.adoc#session-limits[Session limits]):
+`ONECX_PIPELINE__IDLE_TIMEOUT_SECS` (default 300 s without user or bot
+activity), `ONECX_PIPELINE__MAX_SESSION_DURATION_SECS` (default 3600 s) and
+`ONECX_PIPELINE__MAX_AUDIO_MESSAGE_BYTES` (default 32768). `0` disables a
+limit. Keep the maximum duration at or below the proxy timeouts shown below,
+so the application ends the session with a clear outcome instead of the proxy
+cutting the connection.
 
 [#exposing-ws-voice]
 === Exposing `/ws/voice`
@@ -457,7 +462,8 @@ shown and check every device in the path, including the cloud load balancer;
 how a given device counts ping frames is device-specific. Separately from
 idleness, the session checks every 5 seconds whether its token has expired and
 ends with `token_expired` (close code `1008`) unless chat-ui sent a
-`refresh_token` in time.
+`refresh_token` in time. The same check ends a session that reached
+`ONECX_PIPELINE__MAX_SESSION_DURATION_SECS` with `session_max_duration`.
 
 .Replicas and sticky sessions
 Sticky sessions are not required. A session lives in memory of the pod that

@@ -97,11 +97,15 @@ def create_app(container: AppContainer, expiry_check_seconds: float = 5.0) -> Fa
                 await websocket.send_json(event.model_dump())
 
         async def watch_expiry() -> None:
-            # An idle session must end at token expiry, not only when audio arrives.
+            # An idle session must end at token expiry (and at its maximum duration),
+            # not only when audio arrives.
             while True:
                 await asyncio.sleep(expiry_check_seconds)
                 if events := session.check_expiry():
                     await session.end_pipeline(events, _WS_POLICY_VIOLATION)
+                    return
+                if session.max_duration_exceeded():
+                    await session.end_for_limit("session_max_duration")
                     return
 
         watcher: asyncio.Task | None = None

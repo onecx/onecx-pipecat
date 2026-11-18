@@ -9,7 +9,10 @@ session has two phases on the same socket:
 socket to it. Pipecat's `FastAPIWebsocketTransport` and the OneCX frame
 serializer carry all further traffic.
 
-NOTE: Protocol version 3 adds `ai_context` to `start_session` and the
+NOTE: Protocol version 4 makes the `session_closed` `reason` a closed set of typed
+outcomes and adds the session limit outcomes `session_max_duration`,
+`session_idle_timeout` and `audio_message_too_large` (see <<session-limits>>).
+Protocol version 3 adds `ai_context` to `start_session` and the
 `context_update` command. The change is additive: `ai_context` defaults to an
 empty list, so version 2 clients keep working. Protocol version 2 replaced the
 earlier request/response turn protocol.
@@ -86,8 +89,8 @@ MCP tool calls go through `VoiceSession.invoke_tool`, which keeps the
 Before the next LLM inference, context synchronization waits for any interrupted
 reply reconciliation to finish. Context frames passing through the sync
 processor are held during that wait.
-* The pipeline idle timeout is `ONECX_PIPELINE__IDLE_TIMEOUT_SECS` (default:
-disabled; the session ends at token expiry).
+* Session limits (maximum duration, idle timeout, maximum audio message size)
+end the session with a typed outcome; see <<session-limits>>.
 
 == Client to server
 
@@ -138,7 +141,7 @@ Anything else (invalid JSON, unknown `type`, invalid base64) is answered with
 | `interrupted` | The user barged in; drop queued assistant audio.
 | `turn_complete` | `entry_id` of the persisted assistant entry; sent only after it was persisted.
 | `error` | `code` and `message`; see below.
-| `session_closed` | `reason`; the last message before the socket closes.
+| `session_closed` | `reason`, the typed outcome: `client_stopped`, `token_expired`, `context_inconsistent`, `start_failed`, `pipeline_ended`, or a session limit (`session_max_duration`, `session_idle_timeout`, `audio_message_too_large`). The last message before the socket closes.
 |===
 
 Example turn with server VAD:
@@ -213,6 +216,8 @@ Running session:
 
 * `token_expired` — tokens expired; followed by `session_closed{token_expired}`
 and close code 1008. Checked periodically, also while idle.
+* `session_max_duration`, `session_idle_timeout`, `audio_message_too_large` — a
+session limit was reached; see <<session-limits>>.
 * `principal_mismatch` — `refresh_token` for a different user; not applied.
 * `illegal_state` — a command in the wrong state (for example a second `start_session`).
 * `bad_command` — malformed client message.
@@ -222,12 +227,36 @@ are non-fatal; unrecoverable interrupted-context inconsistency reports
 The final `session_closed` reason is `context_inconsistent`.
 * `persistence_failed` — see above.
 
+[#session-limits]
+== Session limits
+
+Three limits bound a running session. Each one ends it with its own typed
+outcome: an `error` event whose `code` is the outcome, then `session_closed`
+with the same value as `reason`, then the socket close. They are configured
+under `ONECX_PIPELINE__` (see xref:configuration.adoc[Configuration]); `0`
+disables a limit.
+
+[cols="2,1,1,3",options="header"]
+|===
+| Outcome | Default | Close code | Reached when
+
+| `session_max_duration` | 3600 s | 1000 | The session has been READY for the maximum duration, whatever its activity. Checked on the same periodic tick as token expiry.
+| `session_idle_timeout` | 300 s | 1000 | No activity for the idle timeout. Activity is speech detected by the VAD, a client turn (`user_started_speaking` / `user_stopped_speaking` with `speech.turn_detection=client`, which has no VAD) and assistant speech. A long model or tool call without assistant speech counts as idle, so keep the timeout generous.
+| `audio_message_too_large` | 32768 bytes | 1008 | One `audio` message carries more than the maximum of decoded PCM16 bytes. The default is about one second of 16 kHz mono audio (32 000 bytes per second); chat-ui sends 40 ms (1 280 byte) chunks. The size is checked before the base64 payload is decoded, so an oversized message is never decoded (the transport's own WebSocket frame size cap still applies on receipt).
+|===
+
+The first limit reached wins. A client should show the outcome to the user
+and may start a new session. The maximum duration should not exceed the
+proxy and load balancer timeouts in front of the service (see
+xref:deployment.adoc[Deployment]).
+
 == Closing
 
-The session ends on `stop`, token expiry, a failed start, client disconnect, or
-unrecoverable interrupted-context inconsistency.
+The session ends on `stop`, token expiry, a session limit, a failed start, client
+disconnect, or unrecoverable interrupted-context inconsistency.
 In every case the Pipecat worker is cancelled, the final events are sent and the
-socket is closed (1008 on start failure and expiry, 1000 otherwise).
+socket is closed (1008 on start failure, token expiry and an oversized audio
+message, 1000 otherwise).
 
 == Speech provider and language
 

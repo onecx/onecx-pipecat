@@ -5,6 +5,7 @@ from onecx_pipecat.protocol import (
     MAX_AI_CONTEXT_ENTRY_CHARS,
     PROTOCOL_VERSION,
     ContextUpdate,
+    SessionClosed,
     StartSession,
     decode_command,
 )
@@ -17,8 +18,8 @@ _START = {
 }
 
 
-def test_protocol_version_is_three():
-    assert PROTOCOL_VERSION == 3
+def test_protocol_version_is_four():
+    assert PROTOCOL_VERSION == 4
 
 
 def test_start_session_without_ai_context_defaults_to_empty():
@@ -69,3 +70,18 @@ def test_too_many_ai_context_entries_are_rejected():
 def test_oversized_ai_context_entry_is_rejected():
     entry = "x" * (MAX_AI_CONTEXT_ENTRY_CHARS + 1)
     assert decode_command({**_START, "ai_context": [entry]}) is None
+
+
+@pytest.mark.parametrize(
+    "reason", ["session_max_duration", "session_idle_timeout", "audio_message_too_large"]
+)
+def test_limit_outcomes_are_typed_session_closed_reasons(reason):
+    assert SessionClosed(reason=reason).model_dump() == {
+        "kind": "session_closed",
+        "reason": reason,
+    }
+
+
+def test_session_closed_rejects_an_unknown_reason():
+    with pytest.raises(ValueError):
+        SessionClosed(reason="whatever")

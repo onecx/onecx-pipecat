@@ -98,9 +98,19 @@ that the pipeline's serializer carries:
 
 Error codes: `authentication_failed`, `chat_not_accessible`,
 `voice_not_permitted`, `config_unavailable`, `unsupported_language`,
-`token_expired`, `illegal_state`, `principal_mismatch`, `bad_command`,
+`token_expired`, `session_max_duration`, `session_idle_timeout`,
+`audio_message_too_large`, `illegal_state`, `principal_mismatch`, `bad_command`,
 `stt_failed`, `llm_failed`, `tts_failed`, `persistence_failed`.
 
+`session_closed.reason` is a closed set of typed outcomes (`client_stopped`,
+`token_expired`, `context_inconsistent`, `start_failed`, `pipeline_ended`,
+`session_max_duration`, `session_idle_timeout`, `audio_message_too_large`).
+The last three are the session limits: the maximum duration is checked by the
+watcher, the idle timeout by Pipecat's idle detector (`on_idle_timeout`, with
+client turns counted as activity) and the audio size by the serializer, which
+flags an oversized message so that `SessionControl` ends the session. Each
+sends `error{code}`, `session_closed{reason}` and closes with 1000 (1008 for
+the audio size).
 ## Session lifecycle
 
 ### States
@@ -118,11 +128,12 @@ CREATED ──start ok──▶ READY ──stop / token expired──▶ CLOSED
    Authentication is established by the first message.
 3. A background watcher checks token expiry periodically, so an idle session
    still ends when its token expires: it sends `token_expired` and
-   `session_closed`, stops the pipeline and closes with 1008.
+   `session_closed`, stops the pipeline and closes with 1008. The same tick
+   ends a session that reached its maximum duration (`session_max_duration`, 1000).
 4. Until a valid `start_session` arrives, a malformed or unknown message
    produces a `bad_command` error. Afterwards the pipeline owns the socket.
-5. The session ends on `stop`, on token expiry, on a failed start, or on
-   client disconnect. The pipeline worker and the watcher are always cancelled.
+5. The session ends on `stop`, on token expiry, on a session limit, on a failed
+   start, or on client disconnect. The pipeline worker and the watcher are always cancelled.
 
 ### Starting a session
 
@@ -148,6 +159,8 @@ Every step fails closed with a typed error, followed by `session_closed`.
 ### While the session is ready
 
 - **Expiry guard:** the watcher ends sessions with expired tokens.
+- **Session limits:** maximum duration, idle timeout and maximum audio message
+  size each end the session with a typed outcome (see the session protocol).
 - **Voice turn:** handled entirely by the pipeline (see above). Empty or
   noise-only input stays ephemeral. A turn persists one human and one
   assistant entry (`COMPLETED` or `INTERRUPTED`) and then emits `turn_complete`.

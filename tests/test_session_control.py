@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,6 +7,7 @@ from pipecat.processors.frame_processor import FrameDirection
 
 from onecx_pipecat.app import create_app
 from onecx_pipecat.pipeline.processors import SessionControl
+from onecx_pipecat.pipeline.serializer import AUDIO_TOO_LARGE
 from onecx_pipecat.protocol import ContextUpdate, ErrorEvent
 from tests.fakes import fake_container
 from tests.voice_helpers import _start, _until_bounded, wait_for_close
@@ -88,3 +89,28 @@ def test_context_update_on_a_live_session_produces_no_error():
         wait_for_close(ws)
 
     assert not [event for event in events if event["kind"] == "error"]
+
+
+@pytest.mark.asyncio
+async def test_oversized_audio_ends_the_session_through_the_limit_callback():
+    too_large = Mock()
+    emit = AsyncMock()
+    control = SessionControl(
+        dispatch=AsyncMock(return_value=[]), emit=emit, audio_too_large=too_large
+    )
+    control.push_frame = AsyncMock()
+
+    await _send(control, dict(AUDIO_TOO_LARGE))
+
+    too_large.assert_called_once_with()
+    emit.assert_not_awaited()
+    control.push_frame.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_oversize_marker_without_a_callback_is_reported_as_a_bad_command():
+    control, _, emit = _control()
+
+    await _send(control, dict(AUDIO_TOO_LARGE))
+
+    emit.assert_awaited_once_with(ErrorEvent(code="bad_command", message="malformed command"))

@@ -53,6 +53,12 @@ app:
     # ONECX_AGENT_CONFIG__BASE_URL: "http://onecx-ai-provider-svc:8080"
     # ONECX_CHAT__BASE_URL: "http://onecx-chat-svc:8080"
     # ONECX_PERMISSION__BASE_URL: "http://onecx-permission-svc:8080"
+    # Voice session limits (0 disables a limit). Each one ends the session with
+    # its own typed outcome; keep the maximum duration at or below the ingress
+    # timeout. Defaults shown:
+    # ONECX_PIPELINE__IDLE_TIMEOUT_SECS: "300"
+    # ONECX_PIPELINE__MAX_SESSION_DURATION_SECS: "3600"
+    # ONECX_PIPELINE__MAX_AUDIO_MESSAGE_BYTES: "32768"
 
   # AWS Transcribe/Polly credentials come from a pre-existing Secret that is
   # not managed by this chart (keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,

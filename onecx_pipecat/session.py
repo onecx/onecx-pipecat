@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -52,6 +53,7 @@ from onecx_pipecat.protocol import (
     Command,
     ContextUpdate,
     DegradedCapability,
+    EndReason,
     ErrorEvent,
     Event,
     RefreshToken,
@@ -70,7 +72,17 @@ from onecx_pipecat.services.speech import (
 )
 
 _NORMAL_CLOSURE = 1000
+_POLICY_VIOLATION = 1008
 logger = logging.getLogger(__name__)
+
+
+# Session limits: reason -> (client-facing message, WebSocket close code). The
+# client broke the audio size policy (1008); the other two are normal endings.
+_LIMIT_OUTCOMES: dict[EndReason, tuple[str, int]] = {
+    "session_max_duration": ("session reached its maximum duration", _NORMAL_CLOSURE),
+    "session_idle_timeout": ("session was idle for too long", _NORMAL_CLOSURE),
+    "audio_message_too_large": ("audio message exceeds the size limit", _POLICY_VIOLATION),
+}
 
 
 class SessionState(StrEnum):
@@ -110,6 +122,7 @@ class VoiceSession:
         self._fatal_task: asyncio.Task[None] | None = None
         self._final_events: list[Event] = []
         self._close_code = _NORMAL_CLOSURE
+        self._ready_at: float | None = None
 
     # -- session identity -------------------------------------------------
 
@@ -179,6 +192,38 @@ class VoiceSession:
             SessionClosed(reason="token_expired"),
         ]
 
+    def max_duration_exceeded(self, now: float | None = None) -> bool:
+        """True when a READY session has run longer than the configured maximum duration."""
+        limit = self._container.settings.pipeline.max_session_duration_secs
+        if self.state is not SessionState.READY or self._ready_at is None or limit <= 0:
+            return False
+        return (time.monotonic() if now is None else now) - self._ready_at >= limit
+
+    def _begin_limit_end(self, reason: EndReason) -> tuple[list[Event], int] | None:
+        """Close a READY session for ``reason``; None when it is not running anymore."""
+        if self.state is not SessionState.READY or self._ended:
+            return None
+        message, close_code = _LIMIT_OUTCOMES[reason]
+        self.state = SessionState.CLOSED
+        return [ErrorEvent(code=reason, message=message), SessionClosed(reason=reason)], close_code
+
+    async def end_for_limit(self, reason: EndReason) -> None:
+        """End the session with a typed limit outcome; for callers outside the pipeline."""
+        if outcome := self._begin_limit_end(reason):
+            await self.end_pipeline(*outcome)
+
+    def limit_exceeded(self, reason: EndReason) -> None:
+        """End the session with a typed limit outcome from inside the pipeline.
+
+        The worker cannot be cancelled from within itself, so, like
+        :meth:`_fatal_context_failure`, the shutdown runs as a separate task.
+        """
+        if self._fatal_task is not None:
+            return
+        if outcome := self._begin_limit_end(reason):
+            self._ended = True
+            self._fatal_task = asyncio.create_task(self.end_pipeline(*outcome))
+
     async def invoke_tool(
         self, server_name: str, tool_name: str, arguments: dict[str, Any] | None = None
     ) -> McpToolResult:
@@ -227,6 +272,7 @@ class VoiceSession:
                 save_entry=self._save_entry,
                 dispatch=self.dispatch,
                 fatal_context_failure=self._fatal_context_failure,
+                limit_exceeded=self.limit_exceeded,
                 vad_analyzer=build_vad_analyzer(self._container.settings),
             )
             try:
@@ -407,6 +453,7 @@ class VoiceSession:
         self._tools = build_tools_schema(llm, self, snapshot, self._allowed_tools)
 
         self.state = SessionState.READY
+        self._ready_at = time.monotonic()
         events: list[Event] = [
             SessionReady(
                 session_id=self.session_id,

@@ -1,4 +1,4 @@
-"""Voice-session wire protocol (version 3).
+"""Voice-session wire protocol (version 4).
 
 The handshake commands (``start_session``) are plain JSON text messages handled
 by the endpoint before the Pipecat pipeline starts. Once the session is READY
@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 # Bounds on page context sent by the client; larger input is rejected, not truncated.
 MAX_AI_CONTEXT_ENTRIES = 20
@@ -148,9 +148,23 @@ class ErrorEvent(BaseModel):
     message: str
 
 
+EndReason = Literal[
+    "client_stopped",
+    "token_expired",
+    "context_inconsistent",
+    "start_failed",
+    "pipeline_ended",
+    "session_max_duration",
+    "session_idle_timeout",
+    "audio_message_too_large",
+]
+
+
 class SessionClosed(BaseModel):
+    """The session ended; ``reason`` is the typed outcome."""
+
     kind: Literal["session_closed"] = "session_closed"
-    reason: str
+    reason: EndReason
 
 
 Event = (

@@ -18,7 +18,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from onecx_pipecat.pipeline.captions import CaptionMessageFrame
-from onecx_pipecat.pipeline.serializer import BAD_COMMAND, wire_event
+from onecx_pipecat.pipeline.serializer import AUDIO_TOO_LARGE, BAD_COMMAND, wire_event
 from onecx_pipecat.protocol import (
     Command,
     ContextUpdate,
@@ -33,14 +33,23 @@ Emit = Callable[[Event], Awaitable[None]]
 
 
 class SessionControl(FrameProcessor):
-    """Handles ``refresh_token`` / ``stop`` / ``context_update`` and malformed commands."""
+    """Handles ``refresh_token`` / ``stop`` / ``context_update`` and malformed commands.
+
+    An oversized audio message (flagged by the serializer) ends the session through
+    ``audio_too_large``.
+    """
 
     def __init__(
-        self, dispatch: Callable[[Command], Awaitable[list[Event]]], emit: Emit, **kwargs
+        self,
+        dispatch: Callable[[Command], Awaitable[list[Event]]],
+        emit: Emit,
+        audio_too_large: Callable[[], None] | None = None,
+        **kwargs,
     ) -> None:
         super().__init__(name="SessionControl", **kwargs)
         self._dispatch = dispatch
         self._emit = emit
+        self._audio_too_large = audio_too_large
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -48,6 +57,9 @@ class SessionControl(FrameProcessor):
             await self.push_frame(frame, direction)
             return
         message = frame.message if isinstance(frame.message, dict) else BAD_COMMAND
+        if message == AUDIO_TOO_LARGE and self._audio_too_large is not None:
+            self._audio_too_large()
+            return
         command = decode_command(message)
         if not isinstance(command, RefreshToken | StopSession | ContextUpdate):
             await self._emit(ErrorEvent(code="bad_command", message="malformed command"))
