@@ -1,13 +1,15 @@
 import base64
 import time
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 from fastapi.websockets import WebSocketDisconnect
 
 from onecx_pipecat.app import create_app
-from onecx_pipecat.config import Settings, VoiceSettings
+from onecx_pipecat.config import PipelineSettings, Settings, VoiceSettings
 from onecx_pipecat.container import AppContainer
+from onecx_pipecat.pipeline import builder
 from tests.fakes import FakePersistence, fake_container
 from tests.voice_helpers import (
     _receive_json_bounded,
@@ -331,3 +333,37 @@ def test_ws_limits_do_not_fire_for_a_session_within_them():
         ws.send_json({"type": "stop"})
         assert _until(ws, "session_closed")[-1]["reason"] == "client_stopped"
         wait_for_close(ws)
+
+
+def test_ws_zero_limits_keep_an_idle_session_open_and_accept_large_audio(monkeypatch):
+    worker_factory = Mock(wraps=builder.PipelineWorker)
+    monkeypatch.setattr(builder, "PipelineWorker", worker_factory)
+    container = _container()
+    container.settings.pipeline = PipelineSettings(
+        idle_timeout_secs=0,
+        max_session_duration_secs=0,
+        max_audio_message_bytes=0,
+    )
+    client = TestClient(create_app(container, expiry_check_seconds=0.05))
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.send_json(_start())
+        assert _receive_json_bounded(ws)["kind"] == "session_ready"
+        with pytest.raises(TimeoutError):
+            _receive_json_bounded(ws, timeout=0.3)
+
+        ws.send_json({"type": "user_started_speaking"})
+        # 40 000 decoded bytes exceed the default 32 KiB audio cap.
+        audio = base64.b64encode(b"\x01\x00" * 20_000).decode("ascii")
+        ws.send_json({"type": "audio", "audio": audio})
+        ws.send_json({"type": "user_stopped_speaking"})
+        events = _until(ws, "turn_complete")
+        assert not [event for event in events if event["kind"] == "error"]
+
+        ws.send_json({"type": "stop"})
+        events = _until(ws, "session_closed")
+        assert not [event for event in events if event["kind"] == "error"]
+        assert events[-1] == {"kind": "session_closed", "reason": "client_stopped"}
+        assert wait_for_close(ws)["code"] == 1000
+
+    worker_factory.assert_called_once()
+    assert worker_factory.call_args.kwargs["idle_timeout_secs"] is None
